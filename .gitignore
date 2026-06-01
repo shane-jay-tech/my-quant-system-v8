@@ -1,0 +1,59 @@
+# ---- 密钥 / 凭证（绝不入库）----
+data/secrets.json
+.env
+.env.local
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 大块可再生行情数据（用 fetch 脚本可重拉）----
+data/history.csv
+data/hs300_index.csv
+data/minute_kline/
+data/cache/
+archive/
+
+# ---- 日志 ----
+logs/
+*.log
+*.jsonl
+data/pipeline_failed.txt
+
+# ---- 备份文件 ----
+*.bak
+*.bak.*
+
+# ---- 操作系统 / IDE ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# ---- 临时 ----
+*.tmp
+~$*
+
+# ---- Public release: private runtime and trading records ----
+data/
+psychology/
+orders/
+results/
+reports/
+sim_results/
+broker_orders/
+gpt_*.txt
+real_trades.csv
+memory.md
+GOAL.md

@@ -1,0 +1,75 @@
+[llm_call] role 'kimi' only supports temperature=1.0, overriding caller value 0.3.
+以下审查按 **(1) 优化点 (2) 健康/Bug (3) 冗余** 三个维度展开，每条均 cite `文件+行号+函数名`，并按 **必修/建议修/可不修** 分级。重点覆盖你要求的 **①数据字段一致性 ②IC/IR 时间对齐与 lookahead bias ③LLM 成本控制（缓存/截断/降级）**。
+
+---
+
+## (1) 优化点
+
+- **【必修】`factor_analysis.py` 约 128 行 `calc_ic()`**  
+  T 日因子（RSI/MACD/均线偏离等均依赖 T 日收盘数据）直接与 T 日起算的 `forward return` 做截面 IC。这意味着 T 日收盘后才能算出的信号被当作 T 日开盘前已知，存在**未来函数/时间对齐偏差**。应在使用前对因子序列做 `shift(1)`，或将 forward return 起点改为 T+1 日，确保信号可执行。
+
+- **【必修】`fetch_stock_data.py` 约 220–228 行 `fetch_eastmoney()`**  
+  东方财富字段映射疑似错位且未统一单位：
+  - `f20` 通常为**总市值**，流通市值应为 `f21`；
+  - `f7` 常见映射为**振幅**，换手率通常对应 `f8`（且代码里 `FIELD_LIST` 已请求 `f8` 却未使用）；
+  - 新浪对 `nmc` 做了 `*10000`（万元→元），东财侧无任何单位转换，与主源单位体系不一致。需在入库前对齐字段语义与单位。
+
+- **【建议修】`fetch_stock_data.py` 约 82 行 `safe_request()`**  
+  首次请求即强制 `time.sleep(random.uniform(0.3, 0.8))`，对主源分页拉取造成无意义延迟。建议首次请求免 sleep，仅在 `attempt>=1` 或翻页时加入退避延时。
+
+- **【建议修】`factor_analysis.py` 约 178 行 `recommend_weights()`**  
+  IR<0.3 回退等权时，`all_factors = [f for f in ic_results.keys()]` 会将被判定为无效的因子也纳入等权分配，逻辑前后矛盾。建议回退时仅对 `p_value<0.10` 的因子等权，或采用市值加权等更稳健策略。
+
+- **【建议修】`fetch_stock_data.py` 约 220 行 `fetch_eastmoney()`**  
+  分页循环内请求失败仅 `continue`，未利用 `safe_request` 的重试能力（已有一次 skip）。建议在页级也做 1–2 次重试，避免偶发网络丢包导致整页数据缺失。
+
+---
+
+## (2) 健康 / Bug
+
+- **【必修】跨文件字段不一致：`fetch_stock_data.py` 输出列 vs `factor_analysis.py` 读取列**  
+  - `fetch_stock_data.py` 约 155 行 `fetch_sina()` 输出列名为 `最新价/涨跌幅/成交额/换手率/流通市值` 等；  
+  - `factor_analysis.py` 约 260 行 `main()` 读取 `history.csv` 时期望 `收盘/最高/最低/成交量` 等列名。  
+  两文件字段体系完全不同，pipeline 无法直接串联，属于跨模块**数据契约断裂**。
+
+- **【必修】`fetch_stock_data.py` 约 220–228 行 `fetch_eastmoney()`**  
+  字段直接 `float(s.get('f2', 0) or 0)` 无任何 try-except。若东方财富接口对停牌或异常票返回 `"-"`、`""` 或 `null`，`float()` 会抛出 `ValueError` 导致整个备用源崩溃，主流程丧失故障转移意义。
+
+- **【必修】`fetch_stock_data.py` 约 237–245 行 `fetch_eastmoney()`**  
+  `FIELD_LIST` 请求了 `f8`，但映射代码完全未使用 `f8`；同时 `f7` 被当作换手率、`f20` 被当作流通市值。若东财字段语义如常规映射（`f7`=振幅，`f20`=总市值），则会导致**成交量/额/换手率/市值**全部数据污染，下游因子与权重计算将基于错误输入。
+
+- **【必修】`research_agent.py` 全文件（尤其约 138–230 行 `generate_report()`）**  
+  文件头声明包含 **"LLM 调用"**，但全文件无任何 LLM API 调用逻辑（无 token 计算、无模型请求、无响应解析）。因此：  
+  - 无 token 截断 / 滑动窗口策略；  
+  - 无调用缓存（cache）机制；  
+  - 无服务降级（如 LLM 超时后切本地规则）。  
+  若业务需求确实依赖 LLM 生成内容，则**核心功能缺失**；若仅需要规则模板，应删除 LLM 相关注释与模块名，避免架构误导。
+
+- **【建议修】`factor_analysis.py` 约 75/85 行 `calc_technical_factors()`**  
+  `ma5_gt_ma20` 与 `macd_gt_0` 为 0/1 二元因子，直接参与 spearman IC 计算虽可运行，但信息含量极低、IR 稳定性差，且与连续型因子混排会拉低整体解释力。建议改为连续型（如均线偏离幅度、MACD 柱状线值）或单独分层评估。
+
+- **【建议修】`fetch_stock_data.py` 约 270–290 行 `fetch_10jqka()`**  
+  正则解析 HTML 无任何 DOM 结构校验，且对缺失字段（成交量、成交额、换手率、流通市值）直接硬编码为 `0`。一旦触发该最终备用源，下游将涌入大量零值，导致 `vol_ratio`、`atr_pct` 等因子出现除零或 NaN 连锁反应。
+
+- **【建议修】`factor_analysis.py` 约 140 行 `calc_ic()`**  
+  `sub_f = sub[[f, f'ret_{horizon}d']].dropna()` 未对因子值做异常值过滤。若 EWM/rolling 计算产生 `inf`/`-inf`（如价格断层导致），`spearmanr` 会给出无意义结果或发出 RuntimeWarning，建议加 `np.isfinite` 掩码过滤。
+
+---
+
+## (3) 冗余
+
+- **【建议修】`research_agent.py` 约 123–135 行 `analyze_v4_relevance()`**  
+  该函数已定义但**全文件无任何调用点**（实际被调用的是约 333 行的 `analyze_v4_association()`），属于死代码，应删除以避免维护负担。
+
+- **【建议修】`research_agent.py` 约 370 行 `main()`**  
+  回测数据 `bt = {'net10': 4.79, 'wr10': 54.5, ...}` 为硬编码字典，未从 `RESULTS_DIR` 中的实际回测结果文件读取。导致报告中的"基准数据"与真实回测脱节，每次策略迭代都需手动改源码，建议改为读取 `results/` 下的最新 JSON/CSV。
+
+- **【可不修】`fetch_stock_data.py` 约 12/25 行 `get_sina_headers()` / `get_em_headers()`**  
+  两函数结构高度重复，仅 `Referer` 与 UA 版本号不同。可合并为 `get_headers(source: str)` 以减少重复代码，但当前不影响运行。
+
+- **【可不修】`factor_analysis.py` 约 48/107 行 `calc_technical_factors()` / `calc_forward_returns()`**  
+  输入数据已在全局按 `['代码', '日期']` sort，但 `groupby` 内部仍各自执行 `.sort_values('日期')`，属于冗余排序，可移除以节省少量计算。
+
+- **【可不修】`research_agent.py` 约 89–120 行 `build_query_tokens()`**  
+  `expansions` 字典中的扩展词与 `daily_mode` 强制注入词存在大量重复（如 `RSI`、`MACD`、`趋势`、`回测` 等），每次运行重复生成相同集合，可提取为模块级常量避免重复构建。
+EXIT=0

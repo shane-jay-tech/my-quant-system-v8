@@ -1,0 +1,115 @@
+D:\code\my-quant-system-v8 量化系统 v8.7+ 第三轮独立 review。Round 2 已修 9 处（M1-M9），现在请你做最后一轮独立审，至少给出 5 条 critical 反对/补丁，重点查"系统一致性"和"功能正确性"，不要复述前两轮。
+
+## Round 2 已修代码（请审这些代码本身有没有新引入的 bug 或漏洞）
+
+### M1 utils/calendar.py:count_trading_days partial coverage
+```python
+local_days = _list_local_trading_days(data_dir)
+if local_days:
+    s_str = s.strftime('%Y-%m-%d')
+    e_str = e.strftime('%Y-%m-%d')
+    local_min, local_max = local_days[0], local_days[-1]
+    if s_str >= local_min and e_str <= local_max:
+        return len([d for d in local_days if s_str <= d <= e_str])
+    total = 0
+    if s_str < local_min:
+        total += _weekday_count(s, _to_date(local_min) - timedelta(days=1))
+    cov_s = max(s_str, local_min)
+    cov_e = min(e_str, local_max)
+    if cov_s <= cov_e:
+        total += len([d for d in local_days if cov_s <= d <= cov_e])
+    if e_str > local_max:
+        total += _weekday_count(_to_date(local_max) + timedelta(days=1), e)
+    return total
+return _weekday_count(s, e)
+```
+
+### M2-M5 strategy_feedback.py:pair_real_trades_fifo
+```python
+def _safe_float(v, default=0.0):
+    try: f = float(v)
+    except (TypeError, ValueError): return default
+    if f != f: return default
+    return f
+
+# 排序：代码→日期→方向（买入=0/卖出=1）
+df['_dir_rank'] = df['方向'].map({'买入': 0, '卖出': 1}).fillna(2).astype(int)
+df = df.sort_values(['代码', '日期', '_dir_rank']).drop(columns=['_dir_rank'])
+
+# 买入入队带 original_shares + total_fee
+buy_queue.append({
+    'price': price, 'shares_left': shares,
+    'original_shares': shares, 'total_fee': fee,
+    'date': d, 'name': name,
+})
+
+# 卖出摊销
+buy_fee_per_share = head['total_fee'] / head['original_shares']
+gross_pnl_amount = (exit_p - entry_p) * take
+pnl_amount = gross_pnl_amount - sell_fee_per_share * take - buy_fee_per_share * take
+cost_basis = entry_p * take + buy_fee_per_share * take
+pnl_pct = (pnl_amount / cost_basis * 100) if cost_basis > 0 else 0
+```
+
+### M6 position_sizer._load_today_exit_signals + bark_sender/parsers._parse_exit_advisor_sells
+```python
+today = datetime.now().strftime('%Y%m%d')
+today_path = os.path.join(BASE_DIR, 'results', f'exit_advisor_{today}.json')
+if not os.path.exists(today_path):
+    return []
+```
+
+### M7 strategy_feedback alert_only 接 cfg
+```python
+alert_only_default = bool(cfg_get('feedback.alert_only', True))
+adjustments = {..., 'alert_only': alert_only_default}
+```
+
+### M8 exit_advisor.load_real_positions FIFO 加权均价
+```python
+buy_queue = []
+for ...: # 同 strategy_feedback FIFO 配对
+total_shares = sum(b['shares_left'] for b in buy_queue)
+weighted_price = sum(b['price'] * b['shares_left'] for b in buy_queue) / total_shares
+earliest = min((b['date'] for b in buy_queue if pd.notna(b['date'])), default=...)
+positions.append({
+    'entry_price': round(weighted_price, 4),
+    'entry_date': earliest.strftime('%Y-%m-%d'),
+    'stop_loss': round(weighted_price * (1 + STOP_LOSS_PCT), 2),
+    ...
+})
+```
+
+### M9 sim_trade full 模式非交易日 update_equity_curve
+```python
+if not is_today_trading_day():
+    state = init_account()
+    prices = load_price_data()
+    if state['positions'] and prices:
+        for pos in state['positions']: ...  # 已有
+    try:
+        update_equity_curve(state)  # 新增
+    except Exception as exc: ...
+    save_state(state)
+    return 0
+```
+
+## 现状
+- 130/130 pytest pass
+- 142/142 self_check pass
+- daily_pipeline 顺序正确（exit_advisor #9 < position_sizing #10 < sim_trade #16）
+- alpha_gate / archive_old_data / portfolio_manager 等 30+ 模块未变动
+
+## 请你聚焦的角度（每条都要 file:line + 修法）
+1. M1 partial-coverage 的边界 case：local_days 长度=1 时？stock_*.csv 文件名带 GBK 字符？_to_date 闭包里 None 值？
+2. M2 original_shares 静态分母：如果同一批买入跨多日多次卖出，最终总扣费是否正好 = total_fee？数值精度（5%/3 股摊销）会不会出现 round-trip 误差？
+3. M3 pnl_pct 用 cost_basis = entry_p * take + buy_fee_per_share * take。这是否正确？卖出时印花税 0.05% 算不算"摩擦成本"应该归入 cost_basis 还是 pnl 扣除？
+4. M5 同日排序：fillna(2) 落到既不是买入也不是卖出的怪行向后排，会不会造成 buy_queue 提前 pop?
+5. M6 严格今日：if today is 节假日（周日跑 catch-up）则 today_path 永远不存在 → 周末永远拿不到 exit signals。是否需要 fallback to 上一交易日 但加陈旧告警？
+6. M8 weighted_price round 4 位 + stop_loss/take_profit round 2 位：先 round 再算 stop_loss，可能差 1 分钱影响触发？
+7. M9 update_equity_curve 在 full 非交易日加了 try-except 静默吞异常，会掩盖真正的 IO/数据错误吗？
+8. 系统一致性：sim_trade.lite 模式（_main_lite）的非交易日逻辑现在还和 full 一致吗？两条路径会不会因这次修复又对称失调？
+9. 一致性：load_real_positions 的 FIFO 和 pair_real_trades_fifo 的 FIFO 实现重复（双胞胎代码），未来改一处忘改另一处怎么办？是否应抽公共 helper？
+10. 还有什么其他 critical 问题？
+
+只给新发现，不复述。每条 ≤6 行。

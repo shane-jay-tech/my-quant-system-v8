@@ -1,0 +1,27 @@
+# Streamlit 配置 — 桌面 app 模式优化
+
+[client]
+# 隐藏顶部 deploy 按钮、汉堡菜单（让它更像 app 而不是网页）
+toolbarMode = "minimal"
+# 显示详细错误（调试需要）
+showErrorDetails = true
+showSidebarNavigation = true
+
+[server]
+headless = true
+fileWatcherType = "none"
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# 量化主题：翠绿主色（K 线涨色），背景偏冷白
+primaryColor = "#10B981"
+backgroundColor = "#F8FAFC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F172A"
+font = "sans serif"
+
+[ui]
+hideTopBar = false

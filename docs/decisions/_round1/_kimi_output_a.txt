@@ -1,0 +1,85 @@
+[llm_call] role 'kimi' only supports temperature=1.0, overriding caller value 0.3.
+以下审计报告按 **必修 / 建议修 / 可不修** 三级分级，逐条引用文件、行号与函数名。重点覆盖您要求的 ①反反爬 ②停牌/退市/新股过滤 ③滑窗去重边界 ④60-day window 长假覆盖 四个维度。
+
+---
+
+## 一、fetch_history.py（历史 K 线 + 增量 + 滑窗）
+
+### 1. 健康 / Bug（必修）
+
+| # | 文件 | 行号 | 函数 | 问题描述 | 风险 |
+|---|------|------|------|----------|------|
+| 1.1 | fetch_history.py | ~Step 4.5 (约 240-260) | `main()` | **重复全量加载导致内存爆炸与文件膨胀**：`disk_df` 已包含 `existing_full + 本次新增`（因为 `save_increment` 不断 append 到同一文件），随后又与 `existing_full` concat，相当于把旧数据在内存中复制了一份。若程序在最终去重前反复崩溃，文件体积会线性累积，直到触发 OOM。 | 全市场 60 日 K 线重复 1 次即内存翻倍；多次中断后 CSV 可能膨胀到 GB 级，pandas 读取直接 OOM。 |
+| 1.2 | fetch_history.py | ~Step 2 (约 175-195) | `main()` | **节假日/盘后增量判断失效（长假后首日漏洞）**：若当天未生成 `stock_YYYYMMDD.csv`，代码回退到“最新 stock_文件”，其日期为节前最后交易日。此时 `latest_by_code` 恰好也等于该日期，程序误判为“已最新”直接 skip。节后首日盘前/盘中运行将**漏掉整个节假日后的第一根日 K**。 | 导致策略使用滞后数据，均线/波动率全部偏移。 |
+| 1.3 | fetch_history.py | ~83-103 | `code_to_sina_symbol()` | **可转债/基金前缀映射错误**：`1` 开头全部映射为 `sz`，但沪市可转债（110xxx、113xxx、118xxx）应属 `sh`。若股票池混入债基，请求返回空或错配数据。 | 数据污染，且空返回会被计入 `fail_count`，浪费请求额度。 |
+
+### 2. 健康 / Bug（建议修）
+
+| # | 文件 | 行号 | 函数 | 问题描述 | 风险 |
+|---|------|------|------|----------|------|
+| 2.1 | fetch_history.py | ~107-147 | `fetch_one_stock_history()` | **未显式处理停牌/退市/新股，且长假滑窗边界未校验**：`datalen=70` 在个股停牌超过 10 天或叠加长假时，实际返回的交易日可能不足 60 个；代码仅判断 `<5` 条丢弃，对 20~50 条的“半满”数据照单全收。 | 策略层计算 60 日均线/波动率时样本不足，导致指标失真。 |
+| 2.2 | fetch_history.py | ~158-163 | `save_increment()` | **追加写入无事务/回滚**：多线程批量 append 时若进程被 SIGKILL，CSV 尾部可能残缺（半行），下次读取直接抛 `ParserError`，导致整个 history 文件不可用。 | 生产环境定时任务被重启后，历史数据服务整体瘫痪。 |
+| 2.3 | fetch_history.py | ~57-80 | `request_with_backoff()` | **TCP 连接未复用**：每次 `requests.get` 新建连接，Sina 服务端易通过 TCP 指纹/端口行为识别为脚本；且未配置 `Accept-Language`、`Accept-Encoding`、`Sec-Ch-Ua` 等现代浏览器指纹。 | 长期运行仍易触发 403/456，尤其是在同 IP 大批量请求时。 |
+| 2.4 | fetch_history.py | ~Step 1 (约 168) | `main()` | **无停牌/退市/新股过滤层**：直接从 `stock_*.csv` 读取全量代码，未剔除 ST、退市整理、上市不足 N 日的新股。 | 策略混入无效代码；新股上市不满 60 日却被强制参与 60 日窗口计算。 |
+
+### 3. 优化点（建议修）
+
+| # | 文件 | 行号 | 函数 | 建议 |
+|---|------|------|------|------|
+| 3.1 | fetch_history.py | ~57-80 | `request_with_backoff()` | 改用 `requests.Session()` 复用 TCP；补充完整 Header（`Accept: */*`、`Accept-Language: zh-CN,zh;q=0.9`、`Sec-Fetch-Site: same-origin` 等），降低被 Sina WAF 拦截概率。 |
+| 3.2 | fetch_history.py | ~Step 4.5 | `main()` | 去重逻辑改为**原地重写**：最终步骤直接用 `disk_df.drop_duplicates(...).to_csv(..., mode='w')` 覆盖，不再 concat `existing_full`，消除内存冗余。 |
+| 3.3 | fetch_history.py | ~107-147 | `fetch_one_stock_history()` | 返回前增加交易日计数校验：`if len(df) < HISTORY_DAYS * 0.8: return None`（或标记为 `DATA_INCOMPLETE`），防止策略使用不足窗长的数据。 |
+| 3.4 | fetch_history.py | ~Step 1 | `main()` | 增量判断改为基于**当前最近交易日**（通过 `akshare.trade_daterank` 或本地交易日历）而非文件名日期，消除节假日边界歧义。 |
+
+### 4. 冗余（可不修）
+
+| # | 文件 | 行号 | 函数 | 说明 |
+|---|------|------|------|------|
+| 4.1 | fetch_history.py | ~149-157 | `get_existing_codes()` | 函数已定义但从未被调用，`main()` 中直接通过 `latest_by_code` 字典推导，可删除。 |
+| 4.2 | fetch_history.py | 多处 | — | 大量 `v8.5+`、`v8.6` 等版本历史注释混入生产代码，建议迁移至 `CHANGELOG.md`。 |
+
+---
+
+## 二、data_loader.py（基本面 / 北向 / 主力 / 情绪）
+
+### 1. 健康 / Bug（必修）
+
+| # | 文件 | 行号 | 函数 | 问题描述 | 风险 |
+|---|------|------|------|----------|------|
+| 1.5 | data_loader.py | ~68 | `load_fundamental_data()` | **akshare 接口参数误用**：`ak.stock_yjbb_em(date=datetime.now().strftime('%Y%m%d'))` 传入的是“自然日”，而该接口的 `date` 应为**报告期**（如 `20240331`、`20240630`）。传入非报告期日期大概率返回空表或异常。 | 基本面因子全空，选股流水线直接失效。 |
+| 1.6 | data_loader.py | ~114 | `load_north_flow()` | **接口名疑似张冠李戴**：`ak.stock_gdfx_free_holding_detail_em()` 在 akshare 中对应“自由流通股持股详情”（股东分析），并非沪深港通（北向）持股。北向正确接口应为 `stock_hsgt_stock_hold_em` 或 `stock_hsgt_hist_em`。 | 数据源错误，因子实为“股东户数/自由流通股东”，策略逻辑被严重误导。 |
+| 1.7 | data_loader.py | ~42-46 | `_save_cache()` | **缓存写操作无并发锁**：多进程/线程同时写入同日缓存文件，极易产生损坏 CSV（行错位、半行）。 | 缓存文件损坏后，当日所有下游任务读到脏数据。 |
+
+### 2. 健康 / Bug（建议修）
+
+| # | 文件 | 行号 | 函数 | 问题描述 | 风险 |
+|---|------|------|------|----------|------|
+| 2.5 | data_loader.py | ~183-189 | `load_market_sentiment()` | **节假日/周末情绪指标全空且无 Fallback**：涨跌停接口传入 `datetime.now()` 的自然日，非交易日必抛异常并被裸吞；`HS300` 波动率仅读本地文件，若文件缺失或不足 20 日，指标直接缺失。 | 情绪 dict 为空，策略无法判断恐慌/贪婪，可能逆向开仓。 |
+| 2.6 | data_loader.py | ~144-172 | `load_fund_flow_individual()` | **资金流数据未校验日期**：`ak.stock_fund_flow_individual()` 通常返回**最近一个交易日**数据。若当日 15:00 前调用，返回的实则是**昨日**数据；代码无日期列校验，直接当作当日使用。 | T-1 资金流入被误判为 T 日，导致追涨杀跌信号错位。 |
+| 2.7 | data_loader.py | ~216-244 | `load_all_factors()` | **Outer join 前未做索引唯一性校验**：若上游数据源（如北向）因接口异常出现重复 `代码`，`join` 将产生笛卡尔积，导致宽表行数膨胀、因子值错位。 | 合并后数据行数 > 股票数，策略计算时被重复股票干扰。 |
+
+### 3. 优化点（建议修）
+
+| # | 文件 | 行号 | 函数 | 建议 |
+|---|------|------|------|------|
+| 3.5 | data_loader.py | ~50-100 | `load_fundamental_data()` | 增加**停牌/退市/新股过滤层**：在返回前过滤 `上市日期 < N 日`、`ST`、`退市整理期` 等标识（可对接 `ak.stock_info_a_code_name()` 或本地白名单）。 |
+| 3.6 | data_loader.py | ~102-142 | `load_north_flow()` | 修正接口后，显式校验返回数据中的日期列，仅保留**最近交易日**记录，防止 akshare 缓存或接口返回历史快照。 |
+| 3.7 | data_loader.py | ~174-213 | `load_market_sentiment()` | HS300 波动率增加网络 Fallback：若本地文件缺失，通过 `ak.index_zh_a_hist()` 拉取沪深 300 指数日线即时计算，保证情绪指标高可用。 |
+| 3.8 | data_loader.py | ~29-46 | `_cache_path` 族 | 对缓存读写加文件锁（`filelock` 或 `fcntl`），并增加缓存校验（如写入 `.crc` 校验文件），防止并发写坏。 |
+
+### 4. 冗余（建议修 → 可不修）
+
+| # | 文件 | 行号 | 函数 | 说明 |
+|---|------|------|------|------|
+| 4.3 | data_loader.py | ~50-100, ~102-142, ~144-172 | 多个 `load_*` | 每个函数重复书写 `try: import akshare as ak except ImportError: return pd.DataFrame()` 与缓存模板逻辑，可提取为装饰器 `@ak_fallback_cache(name)`，减少代码重复与遗漏风险。 |
+| 4.4 | data_loader.py | ~72-78 | `load_fundamental_data()` | `col_map` 中 `'净资产收益率'` 与 `'净资产收益率(%)'` 等映射可在模块级统一定义为 `FUNDAMENTAL_COL_MAP`，避免每个函数重复造轮子。 |
+
+---
+
+## 三、关键风险总结（高管视角）
+
+1. **fetch_history.py 的增量去重是最大雷点**：`disk_df + existing_full` 的双倍加载在 A 股全量 (~5000+) 场景下内存直接爆炸；且长假后首日可能因文件日期回退而**全局漏更新**。
+2. **data_loader.py 存在数据源误用**：北向接口名疑似错误，基本面接口参数误用自然日代替报告期，这两个错误会让整个量化流水线产生**系统性因子偏差**。
+3. **节假日与停牌边界**：60 日滑窗未校验实际交易日数量，叠加长假与个股停牌后，技术指标样本不足，产生**隐性的 look-ahead / 幸存者偏差**。
+4. **反反爬强度不足**：仅 2 组 UA + 固定 Referer，缺少 Session 复用与现代浏览器指纹，长期跑定时任务仍有被封 IP 风险。
+EXIT=0

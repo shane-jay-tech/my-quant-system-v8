@@ -1,0 +1,23 @@
+1. **M1 partial 覆盖区间误扩** `utils/calendar.py:count_trading_days`  
+   当查询区间完全落在本地数据左侧时，`_weekday_count(s, _to_date(local_min)-1)` 会把右边界强拉到 `local_min-1`，导致额外天数被计入（例如查 4/1‑4/5，本地仅 4/10，结果却算到 4/9）。  
+   修法：前段结束应取 `min(e, _to_date(local_min)-1)`，后段起始应取 `max(s, _to_date(local_max)+1)`，仅当区间实际跨越边界时才累积。
+
+2. **M5 排序破坏 FIFO 确定性** `strategy_feedback.py:pair_real_trades_fifo`  
+   `sort_values(['代码','日期','_dir_rank'])` 默认 quick‑sort 非稳定，同日同向记录可能乱序，导致先买入未必先匹配，回测不可复现。  
+   修法：在排序键末尾追加原始索引 `df.sort_values([..., df.index])` 或显式指定 `kind='mergesort'`，并确保输入数据已按时间序排列。
+
+3. **M7 alert_only 布尔陷阱** `strategy_feedback.py` 配置读取行  
+   若 `cfg_get` 返回字符串（如 `'False'`），`bool('False')` 仍为 `True`，用户试图关闭告警模式却无效，静默跳过全部实盘交易。  
+   修法：使用 `str(cfg_get(...)).strip().lower() in ('true','1','yes')`，或统一调用项目已有的安全布尔解析器。
+
+4. **M9 非交易日误用空状态并静默异常** `sim_trade.py` full 分支  
+   `state = init_account()` 疑似重置为空账户，其后的 `update_equity_curve(state)` 会写入错误权益；`try...except` 裸吞所有异常，可能掩盖文件 IO、数据损坏等致命错误。  
+   修法：改为加载当前真实持仓状态；异常必须记录日志并向上传播或设置错误标志，禁止静默忽略。
+
+5. **双胞胎 FIFO 一致性风险** `exit_advisor.py:load_real_positions` 与 `strategy_feedback.py:pair_real_trades_fifo`  
+   两处独立实现相同 FIFO 队列、成本摊销逻辑，未来修改一方极易遗漏同步，造成持仓成本与已实现盈亏计算口径矛盾，触发错误信号。  
+   修法：抽取公共模块 `utils/fifo.py`，提供 `build_queue`、`match_sell`、`weighted_cost` 等函数，双向复用。
+
+6. **M6 非交易日无退出信号** `position_sizer.py` / `bark_sender/parsers.py`  
+   严格用 `datetime.now()` 生成今日文件名 `exit_advisor_{today}.json`，若在周末/节假日补跑，文件永远缺失而返回 `[]`，错失持仓卖出窗口。  
+   修法：增加 fallback 机制：若无今日文件则自动查找最近交易日文件，并发出“陈旧信号”告警；或调度层禁止非交易日执行。

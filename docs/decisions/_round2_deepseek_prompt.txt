@@ -1,0 +1,102 @@
+D:\code\my-quant-system-v8 量化系统 v8.7+ 第二轮清理后修复刚完成 4 处 bug。请你做**第二轮独立 review**，聚焦"系统一致性"和"功能正确性"两个角度，至少给 5 条 critical 反对/补丁建议。
+
+**刚完成的 4 处修复**（120/120 测试绿，self_check 142/142）：
+
+1. **A1 sim_trade.py:873-882** full 模式非交易日分支
+```python
+if state['positions'] and prices:
+    for pos in state['positions']:
+        code = pos['code']
+        if code in prices:
+            px = prices[code]['price']
+            pos['current_price'] = px
+            pos['unrealized_pnl'] = round((px - pos['entry_price']) * pos['shares'], 2)
+            pos['unrealized_pnl_pct'] = round((px / pos['entry_price'] - 1) * 100, 2)
+```
+
+2. **A2 utils/calendar.py + exit_advisor.py** 日历日改交易日
+```python
+# utils/calendar.py
+def count_trading_days(start_date, end_date, data_dir=None) -> int:
+    """统计 [start_date, end_date] 区间的交易日数（包含两端，闭区间）。
+    数据源优先级：
+    1. data/stock_YYYYMMDD.csv 文件名
+    2. 兜底：用 weekday < 5 当作交易日
+    """
+    s, e = _to_date(start_date), _to_date(end_date)
+    if s is None or e is None or s > e:
+        return 0
+    local_days = _list_local_trading_days(data_dir)
+    if local_days:
+        s_str, e_str = s.strftime('%Y-%m-%d'), e.strftime('%Y-%m-%d')
+        in_range = [d for d in local_days if s_str <= d <= e_str]
+        if in_range:
+            return len(in_range)
+    # fallback weekday
+    n = 0
+    cur = s
+    while cur <= e:
+        if cur.weekday() < 5:
+            n += 1
+        cur += timedelta(days=1)
+    return n
+
+# exit_advisor.py
+if entry_date:
+    try:
+        entry_dt = pd.to_datetime(entry_date)
+        from utils.calendar import count_trading_days
+        hold_days = max(0, count_trading_days(entry_dt, datetime.now()) - 1)
+    except Exception:
+        hold_days = 0
+else:
+    hold_days = 0
+```
+
+3. **A3 strategy_feedback.py** 真实交易盲点
+```python
+def pair_real_trades_fifo(real_df):
+    # 按代码分组、日期排序，FIFO 配对买卖
+    # 返回 list[dict] 每个 closed trade 含 pnl_pct, pnl_amount, fee 摊销逻辑：
+    pnl_amount = (exit_p - entry_p) * take - sell_fee_per_share * take \
+                 - (head['fee'] / max(head['shares_left'], 1)) * take
+
+# real_count > 0 分支重写
+real_df, real_count = load_real_trades()
+if real_count > 0:
+    closed = pair_real_trades_fifo(real_df)
+    closed_count = len(closed)
+    if closed_count == 0:
+        adjustments['metrics'] = {... '已平仓': 0, '胜率': '待积累卖出记录'}
+        return adjustments
+    # 算 win_rate / avg_win / avg_loss / profit_factor
+    # alert_only 模式下仅 warnings，门槛 closed_count >= MIN_TRADES_FOR_ADJUST=30
+    return adjustments
+```
+
+4. **A4 core/pipeline.py** exit_advisor 从最后挪到 position_sizing 之前
+- 旧顺序：position_sizing(47) → sim_trade(50) → exit_advisor(60)
+- 新顺序：minute_kline → exit_advisor(#9) → position_sizing(#10) → ... → sim_trade
+- 没拆 sim_trade（保守路）。理由：exit_advisor 读昨天 sim 持仓快照，不依赖今日 sim_trade
+
+**现状**：
+- daily_pipeline.bat → daily_pipeline.py → core.pipeline.main()，无硬编码顺序，新顺序自动生效 ✓
+- bark_sender/parsers.py 读 exit_advisor_*.md，rebalancer 用——bark_push 在 #22 仍最后跑，不冲突
+- portfolio_manager.py 读 exit_advisor_*.json，portfolio_sync #20，不冲突
+- real_trades.csv 当前所有 5 行都有手续费，但 read_csv 读 NaN 时 row.get('手续费', 0) 返回 NaN（不是 0），float(NaN or 0) = NaN
+
+**我已经发现的潜在 bug，需要你确认是否真的有问题**：
+
+X. count_trading_days 当本地 stock_*.csv 不完整覆盖区间时（比如只有 8 天本地数据，但 entry_date 是更早的），会丢日期，少算 hold_days。修法：检查 min(local_days) <= s 且 max(local_days) >= e，否则 fallback weekday。
+
+**请评审**（每条都要 file:line + 修法）：
+
+1. A2 减 1 语义：count_trading_days(entry, today) - 1。entry 当天买入算"持有 0 天"还是"1 天"？工程语义对吗？max_hold_days=10 是"≥10 个交易日"对吗？
+2. A3 FIFO 中 fee 摊销：`pnl_amount = (exit_p - entry_p) * take - sell_fee_per_share * take - (head['fee'] / max(head['shares_left'], 1)) * take`。当一批买入被多次卖出分摊 fee 时，会不会重复扣？
+3. A4 顺序：exit_advisor 提前到 position_sizing 之前 → 读昨天 sim 快照。如果昨天 sim_trade.check_exits 已经把某只票止损/止盈卖出了，今天 exit_advisor 还会给这只票出建议吗？
+4. A3 30 笔门槛：1200 元小资金用户，多久攒到 30 笔平仓？太高了？
+5. 一致性：strategy_feedback 的 metrics 字段名（'已平仓','总盈亏(%)','总盈亏(元)'）会不会被某个 dashboard 模块按字面读取？
+6. fee NaN 处理：`pd.read_csv` NaN 列在 `float(row.get('手续费', 0) or 0)` 会变 NaN，会污染 pnl_amount。怎么修？
+7. 还有什么其他一致性/功能正确 bug？
+
+**只给新发现，不要复述**。重点：一致性 + 功能正确，不是冗余清理。

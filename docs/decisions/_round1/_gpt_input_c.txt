@@ -1,0 +1,858 @@
+"""
+仓位管理引擎 v1 — 5档市场状态 + 动态仓位 + 止损计算
+
+功能：
+1. 5档市场状态检测（强牛/弱牛/震荡/弱熊/强熊）
+2. 基于市场状态的总仓位分配
+3. 单票仓位计算（等权 or 动量加权）
+4. ATR动态止损
+5. 输出每日订单文件 orders/daily_orders_YYYYMMDD.json
+"""
+import os, sys, json, math
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta, date
+from sector_classifier import classify_sector, apply_sector_cap
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
+RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+
+
+# v8.7: 抽到 utils/calendar.py
+from utils.calendar import get_last_trading_day  # noqa: E402,F401
+
+# v7.5: 统一配置中心（保留本地默认值作为 fallback）
+sys.path.insert(0, BASE_DIR)
+from core.config import get as cfg_get, SYSTEM_VERSION
+
+# v8.7: REGIME 系数集中在 cost_model.REGIME_ALLOC，position_sizer 直接 import。
+# 大资金（>3000 元）按 5 档 regime 分配；小资金（<=3000 元）在
+# calculate_position_sizes 里覆盖为 1.0（强熊除外）—— 因为
+# 1200 × 40% = 480, head(3) ~160 元/笔触发 5 元佣金 floor → 死亡螺旋。
+from cost_model import REGIME_ALLOC as REGIME_ALLOCATION  # noqa: E402,F401
+
+# ATR止损倍数
+ATR_STOP_MULTIPLIER = cfg_get('position.atr_stop_multiplier', 2.0)
+# 单票最大仓位占比（占总资金）
+MAX_SINGLE_POSITION = cfg_get('position.max_single_position', 0.15)
+
+# 总资金（模拟/参考）— v8.7：优先用 sim 账户当前 cash+equity 基线，
+# 这样 daily_orders 生成时和 sim_trade.py 的预算保持一致；fallback config 默认。
+_CONFIG_CAPITAL = cfg_get('position.default_capital', 100_000)
+
+
+def _resolve_default_capital():
+    """从 sim_results/account_state.json 读取当前账户基线。
+    Why: v8.7 sim 账户预算来自 real_trades.csv 净投入；position_sizer
+    必须用同一基线生成订单，否则 sim 1709 元、orders 1200 元会错配。
+    """
+    state_path = os.path.join(BASE_DIR, 'sim_results', 'account_state.json')
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            baseline = state.get('initial_capital')
+            if isinstance(baseline, (int, float)) and baseline > 0:
+                return float(baseline)
+        except Exception:
+            pass
+    return _CONFIG_CAPITAL
+
+
+DEFAULT_CAPITAL = _resolve_default_capital()
+
+
+def fetch_hs300_data():
+    """加载沪深300指数数据（从data/hs300_index.csv）"""
+    f = os.path.join(DATA_DIR, 'hs300_index.csv')
+    if not os.path.exists(f):
+        print("[SIZER] No HS300 index data, using fallback")
+        return None
+    df = pd.read_csv(f)
+    df['日期'] = pd.to_datetime(df['日期'])
+    df = df.sort_values('日期')
+    return df
+
+
+def _apply_regime_hysteresis(raw_regime):
+    """v8: regime hysteresis — 候选 regime 持续 ≥N 个 trading day 后才切换
+
+    Why (跨周末 bug 修复): 原版用 candidate_days 计数器，每次 pipeline 跑就 +1；
+    周五震荡 → 周一弱牛 → 周二震荡，会被算成"连续 2 天弱牛"误切档。
+    新版用 candidate_first_seen_date + 实际 trading days 数判定。
+
+    Returns: effective_regime
+    """
+    state_file = os.path.join(DATA_DIR, 'regime_state.json')
+    hysteresis_days = cfg_get('position.regime_hysteresis_days', 2)
+    today = date.today()
+
+    state = {}
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+
+    last_regime = state.get('last_regime')
+    candidate = state.get('candidate_regime')
+    cand_first_seen_str = state.get('candidate_first_seen_date')
+    cand_first_seen = None
+    if cand_first_seen_str:
+        try:
+            cand_first_seen = datetime.strptime(cand_first_seen_str, '%Y-%m-%d').date()
+        except Exception:
+            cand_first_seen = None
+
+    def _trading_days_between(d1, d2):
+        """v8.6: 用 data/stock_*.csv 文件名集合数交易日。
+
+        Why: 原版 cal_days * 5/7 在跨春节/十一长假时误差会到 ±5 天，
+        hysteresis 提前/延后切档，节后开盘踩坑。文件名本身就是真实交易日历。
+        """
+        if d1 is None or d2 is None:
+            return 0
+        if d2 <= d1:
+            return 0
+        import glob as _glob
+        files = _glob.glob(os.path.join(DATA_DIR, 'stock_*.csv'))
+        count = 0
+        for f in files:
+            basename = os.path.basename(f)
+            date_str = basename.replace('stock_', '').replace('.csv', '')
+            try:
+                fdate = datetime.strptime(date_str, '%Y%m%d').date()
+                if d1 < fdate <= d2:
+                    count += 1
+            except ValueError:
+                continue
+        return count
+
+    if last_regime is None:
+        # 首次启动
+        effective = raw_regime
+        new_state = {
+            'last_regime': raw_regime,
+            'candidate_regime': raw_regime,
+            'candidate_first_seen_date': today.strftime('%Y-%m-%d'),
+            'candidate_trading_days': 1,
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'switched_today': True,
+        }
+    elif raw_regime == last_regime:
+        # 信号与当前一致：维持
+        effective = last_regime
+        new_state = {
+            'last_regime': last_regime,
+            'candidate_regime': last_regime,
+            'candidate_first_seen_date': today.strftime('%Y-%m-%d'),
+            'candidate_trading_days': 1,
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'switched_today': False,
+        }
+    else:
+        # 信号与当前不同
+        if raw_regime != candidate:
+            # 新候选出现 → 重置 first_seen
+            candidate = raw_regime
+            cand_first_seen = today
+        elif cand_first_seen is None:
+            cand_first_seen = today
+
+        td_held = _trading_days_between(cand_first_seen, today)
+
+        if td_held >= hysteresis_days - 1:
+            # 候选累计达标 → 真切档（first_seen 那天算第 1 天，再过 N-1 天即第 N 天）
+            effective = candidate
+            new_state = {
+                'last_regime': candidate,
+                'candidate_regime': candidate,
+                'candidate_first_seen_date': today.strftime('%Y-%m-%d'),
+                'candidate_trading_days': 1,
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'switched_today': True,
+            }
+        else:
+            effective = last_regime
+            new_state = {
+                'last_regime': last_regime,
+                'candidate_regime': candidate,
+                'candidate_first_seen_date': cand_first_seen.strftime('%Y-%m-%d') if cand_first_seen else today.strftime('%Y-%m-%d'),
+                'candidate_trading_days': td_held + 1,
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'switched_today': False,
+            }
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(new_state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[SIZER] regime_state save failed: {e}")
+
+    if effective != raw_regime:
+        print(f"[SIZER] Regime hysteresis: raw={raw_regime} → effective={effective} "
+              f"(candidate {candidate} since {new_state.get('candidate_first_seen_date')}, "
+              f"td={new_state.get('candidate_trading_days')}/{hysteresis_days})")
+    return effective
+
+
+def detect_market_regime(index_df):
+    """检测当前市场的5档状态
+
+    指标：
+    1. HS300 vs MA20 — 短期趋势方向
+    2. HS300 vs MA60 — 中期趋势确认
+    3. 近5日涨幅 — 趋势强度
+    4. 近20日波动率 — 风险环境
+
+    v8: 经过 hysteresis 平滑，避免临界跳变（见 _apply_regime_hysteresis）
+    """
+    if index_df is None or len(index_df) < 60:
+        return '震荡', {'ma20': None, 'ma60': None, 'ret5d': 0, 'vol20': 0}
+
+    df = index_df.copy()
+    close = df['收盘']
+    df['MA20'] = close.rolling(20).mean()
+    df['MA60'] = close.rolling(60).mean()
+    df['ret_1d'] = close.pct_change()
+    df['ret_5d'] = close.pct_change(5)
+    df['vol20'] = df['ret_1d'].rolling(20).std()
+
+    latest = df.iloc[-1]
+    ma20 = latest.get('MA20', None)
+    ma60 = latest.get('MA60', None)
+    price = latest['收盘']
+    ret_5d = latest.get('ret_5d', 0) or 0
+    vol20 = latest.get('vol20', 0) or 0
+
+    info = {
+        'ma20': round(ma20, 2) if pd.notna(ma20) else None,
+        'ma60': round(ma60, 2) if pd.notna(ma60) else None,
+        'price': round(price, 2),
+        'ret_5d_pct': round(ret_5d * 100, 2),
+        'vol20_pct': round(vol20 * 100, 2),
+    }
+
+    if pd.isna(ma20) or pd.isna(ma60):
+        return '震荡', info
+
+    above_ma20 = price > ma20
+    above_ma60 = price > ma60
+    strong_trend = abs(ret_5d) > 0.02
+    positive_trend = ret_5d > 0
+
+    if above_ma20 and above_ma60 and strong_trend and positive_trend:
+        regime = '强牛'
+    elif above_ma20 and positive_trend:
+        regime = '弱牛'
+    elif above_ma20 and above_ma60 and not strong_trend:
+        regime = '弱牛'
+    elif not above_ma20 and not above_ma60 and strong_trend and not positive_trend:
+        regime = '强熊'
+    elif not above_ma20 and not above_ma60:
+        regime = '弱熊'
+    elif abs(price / ma20 - 1) < 0.01:
+        regime = '震荡'
+    elif not above_ma20 and above_ma60:
+        regime = '弱熊'
+    else:
+        regime = '震荡'
+
+    # 高波动下调一档
+    if vol20 > 0.025 and regime in ('强牛', '弱牛'):
+        regime = '弱牛' if regime == '强牛' else '震荡'
+
+    # v8: hysteresis 平滑 — 连续 ≥N 天确认才切档
+    effective_regime = _apply_regime_hysteresis(regime)
+    info['raw_regime'] = regime
+    info['hysteresis_applied'] = (effective_regime != regime)
+    return effective_regime, info
+
+
+def calculate_position_sizes(picks_df, regime, total_capital=DEFAULT_CAPITAL):
+    """计算每只股票的具体仓位
+
+    Args:
+        picks_df: 选股结果，需包含 代码, 名称, 收盘, momentum 等字段
+        regime: 市场状态
+        total_capital: 总资金
+
+    Returns:
+        list[dict]: 每只股票的仓位信息
+    """
+    # v8: 持仓状态检查 — 从候选池中排除已持仓代码避免重复买入
+    # Why: 系统每天重新生成订单，若不 exclude 会让同一只票被重复推荐 → 仓位翻倍超出风控
+    if cfg_get('portfolio.exclude_held_from_picks', True):
+        try:
+            from portfolio_manager import get_held_codes
+            held = get_held_codes()
+            if held and len(picks_df) > 0:
+                before = len(picks_df)
+                picks_df = picks_df[~picks_df['代码'].astype(str).str.zfill(6).isin(held)].copy()
+                excluded = before - len(picks_df)
+                if excluded > 0:
+                    print(f"[SIZER] Portfolio dedup: excluded {excluded} already-held stocks: {held}")
+        except Exception as e:
+            print(f"[SIZER] portfolio_manager unavailable: {e}, skipping dedup")
+
+    alloc_pct = REGIME_ALLOCATION.get(regime, 0.20)
+    investable = total_capital * alloc_pct
+
+    # v8: 小资金适配（<=3000元）
+    # 关键洞察（来自 P0 修复后真实回测）：1200 元下成本敏感性极高
+    #   - head(3) ~400元/笔 → cost ≈ 1.5%/笔
+    #   - head(5) ~240元/笔 → cost ≈ 2.5%/笔
+    # 所以保持 head(3) 集中持仓的成本优势 + 锁定全仓（除强熊）防成本死亡螺旋
+    effective_max_single = MAX_SINGLE_POSITION
+    picks = picks_df.copy()
+    if total_capital <= 3000:
+        # 混合方案（2026-05-28）：小资金锁定全仓，强熊仍空仓
+        # 大资金走 REGIME_ALLOCATION 分档（强牛 80%/震荡 40%/弱熊 20%）避险
+        # 小资金分档会让单笔金额 < 200 元 → 5 元佣金 floor 占成本 5%+ → 必亏
+        if regime != '强熊':
+            alloc_pct = 1.0
+        investable = total_capital * alloc_pct
+        # 保持 head(3) 集中持仓（成本最优）
+        picks = picks.head(3)
+        # v8.6 改动：max_single 从硬编码 0.5 改为 1.0/n（动态等权上限），
+        # 修复数学不一致 — 原 0.5 × 3 只 = 总 150% 在动量加权下可能让某只 > 50%
+        n_picks = max(1, len(picks))
+        effective_max_single = 1.0 / n_picks
+        print(f"[SIZER] Small capital mode: CNY{total_capital}, regime={regime} alloc={alloc_pct*100:.0f}%, "
+              f"using top-{len(picks)} picks, max single={effective_max_single*100:.1f}%, investable={investable:.0f}")
+
+    if alloc_pct == 0 or len(picks) == 0:
+        return [], {
+            'regime': regime,
+            'alloc_pct': alloc_pct,
+            'investable': investable,
+            'total_capital': total_capital,
+        }
+
+    n = len(picks)
+
+    # 等权分配 + 动量微调
+    base_weight = 1.0 / n
+
+    if 'momentum' in picks.columns and picks['momentum'].abs().sum() > 0:
+        # 动量标准化为0.5~1.5倍基础权重
+        mom = picks['momentum'].fillna(0)
+        mom_adj = 0.5 + (mom - mom.min()) / (mom.max() - mom.min() + 1e-9)
+        # head(3)/dedup 后 picks.index 不是 0..n-1，转 ndarray 让 weights[i] 按位置取
+        weights = (mom_adj / mom_adj.sum()).to_numpy()
+    else:
+        weights = np.full(n, base_weight)
+
+    orders = []
+    skipped = 0
+    for i, (_, row) in enumerate(picks.iterrows()):
+        w = weights[i]
+        amount = investable * w
+        price = row.get('收盘', row.get('最新价', 0))
+        if price == 0:
+            continue
+        shares = int(amount / price / 100) * 100
+        # 确保至少1手：如果连1手都远超过预算则跳过该股
+        if shares == 0:
+            if 100 * price > amount * 1.5:
+                skipped += 1
+                continue
+            shares = 100
+        actual_amount = shares * price
+        position_pct = actual_amount / total_capital
+
+        # 单票上限检查
+        if position_pct > effective_max_single:
+            actual_amount = total_capital * effective_max_single
+            shares = int(actual_amount / price / 100) * 100
+            if shares == 0:
+                skipped += 1
+                continue
+            actual_amount = shares * price
+
+        orders.append({
+            '代码': str(row.get('代码', '')).zfill(6),
+            '名称': str(row.get('名称', '')),
+            '方向': '买入',
+            '价格': round(price, 2),
+            '股数': shares,
+            '金额': round(actual_amount, 2),
+            '仓位占比': f'{actual_amount/total_capital*100:.1f}%',
+            '动量权重': f'{w*100:.1f}%',
+            '板块': classify_sector(str(row.get('代码', '')), str(row.get('名称', ''))),
+        })
+
+    if skipped > 0:
+        print(f"[SIZER] Skipped {skipped} expensive stocks (price too high for budget)")
+
+    # v8: 小资金 fallback — head(3) 全部太贵时，取最强 1 只全押 investable
+    # Why: 1200 元在震荡/弱熊市下 investable=240-480 元，分散到 3 只时单只预算 ~80-160 元，
+    # 大量好票 100 股需 200+ 元而被 skipped；与其空仓不如集中买最强信号
+    is_small_capital = total_capital <= 3000
+    if is_small_capital and len(orders) == 0 and skipped > 0 and len(picks_df) > 0:
+        print(f"[SIZER] Small-cap fallback: all top-{n} skipped, retrying with single strongest pick")
+        for _, row in picks_df.head(8).iterrows():  # 扩大候选池到 head(8) 找一只能买的
+            price = row.get('收盘', row.get('最新价', 0))
+            if price == 0:
+                continue
+            shares = int(investable / price / 100) * 100
+            if shares == 0:
+                continue
+            actual_amount = shares * price
+            orders.append({
+                '代码': str(row.get('代码', '')).zfill(6),
+                '名称': str(row.get('名称', '')),
+                '方向': '买入',
+                '价格': round(price, 2),
+                '股数': shares,
+                '金额': round(actual_amount, 2),
+                '仓位占比': f'{actual_amount/total_capital*100:.1f}%',
+                '动量权重': '100.0%',
+                '板块': classify_sector(str(row.get('代码', '')), str(row.get('名称', ''))),
+            })
+            print(f"[SIZER]   fallback picked: {row.get('代码')} {row.get('名称')} @ {price} × {shares}")
+            break
+
+    # 板块仓位上限检查（单板块不超过30%）
+    orders = apply_sector_cap(orders, max_sector_pct=0.30, total_capital=total_capital)
+
+    # 最后防线：移除所有0股订单
+    before = len(orders)
+    orders = [o for o in orders if o.get('股数', 0) > 0]
+    if len(orders) < before:
+        print(f"[SIZER] Removed {before - len(orders)} zero-share orders (post-cap filter)")
+
+    summary = {
+        'regime': regime,
+        'alloc_pct': alloc_pct,
+        'investable': round(investable, 2),
+        'total_capital': total_capital,
+        'used_amount': round(sum(o['金额'] for o in orders), 2),
+        'cash_remaining': round(total_capital - sum(o['金额'] for o in orders), 2),
+        'sector_distribution': {},
+    }
+
+    # 统计板块分布
+    for o in orders:
+        sec = o.get('板块', '其他')
+        summary['sector_distribution'][sec] = summary['sector_distribution'].get(sec, 0) + o['金额']
+
+    return orders, summary
+
+
+def _stop_loss_floor(code, entry_price):
+    """按板块返回跌停板限制价（主板-10%，科创/创业-20%，北交所-30%）"""
+    if code.startswith('688') or code.startswith('300') or code.startswith('301'):
+        return entry_price * 0.80
+    if code.startswith('8') or code.startswith('9'):
+        return entry_price * 0.70
+    return entry_price * 0.90
+
+
+def calculate_stop_loss(hist, orders, atr_period=14, multiplier=ATR_STOP_MULTIPLIER):
+    """基于ATR计算每只股票的动态止损价
+
+    止损价 = 入场价 - ATR × multiplier
+    跌停板限制按板块区分（主板-10%，科创/创业-20%，北交所-30%）
+    """
+    if hist is None or len(hist) == 0:
+        return orders
+
+    for order in orders:
+        code = order['代码']
+        entry_price = order['价格']
+
+        stock_hist = hist[hist['代码'] == code].sort_values('日期')
+        if len(stock_hist) < atr_period + 1:
+            # 回退：固定-5%止损
+            order['止损价'] = round(entry_price * 0.95, 2)
+            order['止损方式'] = '固定-5%'
+            order['止损幅度'] = '-5.0%'
+            continue
+
+        # ATR计算
+        high = stock_hist['最高'] if '最高' in stock_hist.columns else stock_hist['收盘']
+        low = stock_hist['最低'] if '最低' in stock_hist.columns else stock_hist['收盘']
+        close_prev = stock_hist['收盘'].shift(1)
+
+        tr1 = high - low
+        tr2 = abs(high - close_prev)
+        tr3 = abs(low - close_prev)
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(atr_period).mean().iloc[-1]
+
+        if pd.isna(atr) or atr <= 0:
+            order['止损价'] = round(entry_price * 0.95, 2)
+            order['止损方式'] = '固定-5%'
+            order['止损幅度'] = '-5.0%'
+        else:
+            stop_price = entry_price - atr * multiplier
+            # 跌停板限制按板块区分
+            floor = _stop_loss_floor(code, entry_price)
+            stop_price = max(stop_price, floor)
+            stop_pct = (stop_price / entry_price - 1) * 100
+            order['止损价'] = round(stop_price, 2)
+            order['止损方式'] = f'ATR({atr_period})×{multiplier}'
+            order['止损幅度'] = f'{stop_pct:+.1f}%'
+
+    return orders
+
+
+def _load_today_exit_signals():
+    """v8.5: 读取今日 exit_advisor 输出，把卖出建议合并到 daily_orders.md
+    Why: 用户每天只看 daily_orders，看不到 exit_advisor 报告 → 错过止损/止盈信号
+    v8.7+ Round 2: 严格只读今天的文件。之前用 wildcard 兜底，今天文件缺失时
+                   静默用昨天的 → 用户拿到陈旧卖出建议（已经卖过了/价格变了）。
+    Returns: list of dict（含 code/name/action/current_price/pnl_pct/reason）or []
+    """
+    today = datetime.now().strftime('%Y%m%d')
+    today_path = os.path.join(BASE_DIR, 'results', f'exit_advisor_{today}.json')
+    if not os.path.exists(today_path):
+        print(f"[SIZER] exit_advisor 今日文件不存在 ({today_path})；不合并陈旧建议")
+        return []
+    try:
+        with open(today_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return [d for d in data if 'sell' in str(d.get('action', '')).lower()]
+    except Exception as e:
+        print(f"[SIZER] exit_advisor merge skipped: {e}")
+        return []
+
+
+def generate_order_file(orders, summary, regime_info):
+    """生成每日订单JSON文件"""
+    os.makedirs(ORDERS_DIR, exist_ok=True)
+    today = get_last_trading_day(fmt='%Y%m%d')
+
+    # v8.5: 加载今日 exit_advisor 卖出建议
+    exit_signals = _load_today_exit_signals()
+
+    output = {
+        '生成时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        '市场状态': {
+            '档位': summary['regime'],
+            '沪深300': regime_info.get('price'),
+            'MA20': regime_info.get('ma20'),
+            'MA60': regime_info.get('ma60'),
+            '近5日涨跌': f"{regime_info.get('ret_5d_pct', 0):+.2f}%",
+            '波动率': f"{regime_info.get('vol20_pct', 0):.2f}%",
+        },
+        '资金分配': {
+            '总资金': summary['total_capital'],
+            '仓位比例': f"{summary['alloc_pct']*100:.0f}%",
+            '可投资金': summary['investable'],
+            '已用资金': summary['used_amount'],
+            '剩余现金': summary['cash_remaining'],
+        },
+        '订单': orders,
+        '今日卖出': exit_signals,
+        '风控提示': [],
+    }
+
+    # 风控提示
+    if summary['regime'] == '强熊':
+        output['风控提示'].append('强熊市：建议空仓观望，等待市场企稳信号')
+    elif summary['regime'] == '弱熊':
+        output['风控提示'].append('弱熊市：仓位控制在20%以内，严格止损')
+    elif summary['alloc_pct'] >= 0.6:
+        output['风控提示'].append('牛市环境：可将止损适当放宽（ATR×2.5），让利润奔跑')
+
+    if summary['used_amount'] / summary['total_capital'] > 0.7:
+        output['风控提示'].append('仓位较重（>70%），注意分散板块风险')
+
+    # 写入JSON
+    json_path = os.path.join(ORDERS_DIR, f'daily_orders_{today}.json')
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    # 同时生成可读MD摘要
+    md_path = os.path.join(ORDERS_DIR, f'daily_orders_{today}.md')
+    lines = [
+        f"# 每日订单 — {get_last_trading_day(fmt='%Y-%m-%d')}",
+        "",
+        "> ⚠️ **价格语义说明**：下方『价格』栏为信号触发日的收盘参考价；",
+        "> 实际成交建议在**次日开盘集合竞价**完成（与 v8 回测的 T+1 next_open 一致）。",
+        "> 实盘成交价可能因开盘跳空 ±0.5% 偏离参考价；",
+        "> 跳空 > +3% 已由 broker_adapter 自动过滤。",
+        "",
+    ]
+
+    # v8.5: 卖出建议放在最显眼位置（在买入和市场状态前）
+    if exit_signals:
+        lines.extend([
+            f"## 🚨 今日卖出建议（{len(exit_signals)} 只）",
+            "",
+            "> **优先级高于买入**：先处理卖出，再考虑买入。",
+            "",
+            "| 代码 | 名称 | 入场价 | 现价 | 盈亏 | 持有 | 建议 | 原因 |",
+            "|------|------|--------|------|------|------|------|------|",
+        ])
+        for s in exit_signals:
+            code = s.get('code', '')
+            name = s.get('name', '')
+            entry = s.get('entry_price', 0)
+            curr = s.get('current_price', 0)
+            pnl = s.get('pnl_pct', 0)
+            hold = s.get('hold_days', 0)
+            label = s.get('action_label', s.get('action', ''))
+            reason = s.get('signals', [{}])[0].get('reason', '') if s.get('signals') else ''
+            lines.append(
+                f"| {code} | {name} | {entry} | {curr} | {pnl:+.1f}% | {hold}日 | {label} | {reason[:60]} |"
+            )
+        lines.append("")
+    else:
+        lines.extend([
+            "## ✅ 今日无卖出建议",
+            "",
+            "（所有持仓未触发止损/止盈/死叉/到期等出场条件）",
+            "",
+        ])
+
+    lines.extend([
+        f"## 市场状态：{summary['regime']}",
+        f"",
+        f"| 指标 | 数值 |",
+        f"|------|------|",
+        f"| 沪深300 | {regime_info.get('price', 'N/A')} |",
+        f"| MA20 | {regime_info.get('ma20', 'N/A')} |",
+        f"| MA60 | {regime_info.get('ma60', 'N/A')} |",
+        f"| 近5日涨跌 | {regime_info.get('ret_5d_pct', 0):+.2f}% |",
+        f"| 波动率(20日) | {regime_info.get('vol20_pct', 0):.2f}% |",
+        f"",
+        f"## 资金分配",
+        f"",
+        f"- **总资金**：¥{summary['total_capital']:,.0f}",
+        f"- **仓位比例**：{summary['alloc_pct']*100:.0f}%",
+        f"- **可投资金**：¥{summary['investable']:,.0f}",
+        f"- **已用资金**：¥{summary['used_amount']:,.0f}",
+        f"- **剩余现金**：¥{summary['cash_remaining']:,.0f}",
+        f"",
+        f"## 今日买入订单（建议持有 5-10 个交易日）",
+        f"",
+        f"| 代码 | 名称 | 方向 | 价格 | 股数 | 金额 | 占比 | 止损价 | 止损幅度 | 日内偏离 | 日内建议 |",
+        f"|------|------|------|------|------|------|------|--------|----------|----------|----------|",
+    ])
+
+    for o in orders:
+        stop = o.get('止损价', 'N/A')
+        stop_pct = o.get('止损幅度', 'N/A')
+        dev_val = o.get('日内偏离%')
+        dev = f"{dev_val:+.1f}%" if dev_val is not None else 'N/A'
+        dev_advice = o.get('日内建议', 'N/A')
+        lines.append(
+            f"| {o['代码']} | {o['名称']} | {o['方向']} | {o['价格']} | "
+            f"{o['股数']} | {o['金额']:,.0f} | {o['仓位占比']} | {stop} | {stop_pct} | {dev} | {dev_advice} |"
+        )
+
+    if output['风控提示']:
+        lines.extend(['', '## 风控提示', ''])
+        for tip in output['风控提示']:
+            lines.append(f'- {tip}')
+
+    lines.extend(['', '---', f'*订单由 position_sizer.py v{SYSTEM_VERSION} 自动生成*'])
+
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+    print(f"[SIZER] Orders saved: {json_path}")
+    print(f"[SIZER] Summary saved: {md_path}")
+    return json_path
+
+
+def calc_gap_deviation(code, current_price, hist_df):
+    """
+    降级方案：使用前一日收盘价 vs 当日开盘价的跳空幅度作为替代指标
+    当分钟K线数据不可用时调用
+    """
+    if hist_df is None or len(hist_df) == 0:
+        return None
+    stock_hist = hist_df[hist_df['代码'] == code].sort_values('日期')
+    if len(stock_hist) < 2:
+        return None
+    prev_close = stock_hist.iloc[-1]['收盘']
+    gap_pct = (current_price / prev_close - 1) * 100 if prev_close > 0 else 0
+    if abs(gap_pct) > 2:
+        if gap_pct > 0:
+            advice = f'开盘跳空+{gap_pct:.1f}%（>2%），建议观望等待回调'
+        else:
+            advice = f'开盘跳空{gap_pct:.1f}%（<-2%），偏离较大，关注是否企稳'
+    elif abs(gap_pct) > 1:
+        advice = f'开盘波动{gap_pct:+.1f}%，在正常区间但需关注'
+    else:
+        advice = f'开盘波动在正常区间（{gap_pct:+.1f}%）'
+    return {'gap_pct': round(gap_pct, 2), 'advice': advice}
+
+
+def load_from_multi_vote():
+    """从多策略投票JSON加载选股结果（v7: 主要数据源）"""
+    vote_files = sorted(
+        [f for f in os.listdir(ORDERS_DIR) if f.startswith('multi_vote_') and f.endswith('.json')],
+        reverse=True
+    )
+    if not vote_files:
+        return None
+
+    with open(os.path.join(ORDERS_DIR, vote_files[0]), 'r', encoding='utf-8') as f:
+        votes = json.load(f)
+
+    if not votes:
+        return None
+
+    picks = []
+    for v in votes:
+        code = str(v.get('代码', '')).zfill(6)
+        name = v.get('名称', '')
+        price = float(v.get('最新价', 0))
+        chg = float(v.get('涨跌幅', 0)) if v.get('涨跌幅') else 0
+        final_score = float(v.get('最终得分', 60))
+        consensus = v.get('共识度', '1/3')
+        # 涨跌幅映射为momentum信号（+/-10%线性映射到0-1）
+        momentum = 0.5 + chg / 20  # chg=0→0.5, chg=10→1.0, chg=-10→0
+
+        picks.append({
+            '代码': code,
+            '名称': name,
+            '收盘': price,
+            '涨跌幅': chg,
+            'momentum': round(max(0, min(1, momentum)), 3),
+            'final_score': final_score,
+            'consensus': consensus,
+        })
+
+    df = pd.DataFrame(picks)
+    # 过滤ST股票
+    if '名称' in df.columns:
+        df = df[~df['名称'].str.contains(r'\*?ST', na=False, regex=True)]
+    return df
+
+
+def load_latest_picks():
+    """加载最新的选股结果（v7: 优先多策略投票，回退策略报告）"""
+    # 1. 优先从多策略投票JSON加载
+    df = load_from_multi_vote()
+    if df is not None and len(df) > 0:
+        print(f"[SIZER] Loaded {len(df)} picks from multi_vote (3-strategy consensus)")
+        return df
+
+    # 2. 回退：从strategy markdown报告解析
+    sf = sorted([f for f in os.listdir(RESULTS_DIR) if f.startswith('strategy_')], reverse=True)
+    if sf:
+        import re
+        with open(os.path.join(RESULTS_DIR, sf[0]), 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        picks = []
+        for m in re.finditer(r'\|\s*(\d{6})\s*\|\s*([^|]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|', content):
+            picks.append({
+                '代码': m.group(1),
+                '名称': m.group(2).strip(),
+                '收盘': float(m.group(3)),
+                'momentum': 0.5,
+            })
+
+        if picks:
+            df = pd.DataFrame(picks)
+            if '名称' in df.columns:
+                df = df[~df['名称'].str.contains(r'\*?ST', na=False, regex=True)]
+            print(f"[SIZER] Loaded {len(df)} picks from strategy report (fallback)")
+            return df
+
+    # 3. 最终fallback: 读data目录下最新的stock csv
+    stocks = sorted([f for f in os.listdir(DATA_DIR) if f.startswith('stock_')], reverse=True)
+    if stocks:
+        df = pd.read_csv(os.path.join(DATA_DIR, stocks[0]), dtype={'代码': str})
+        col_map = {'最新价': '收盘', '涨跌幅': '涨跌', '名称': '名称'}
+        df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns and v not in df.columns})
+        if '收盘' not in df.columns and '最新价' in df.columns:
+            df['收盘'] = df['最新价']
+        if 'momentum' not in df.columns:
+            df['momentum'] = 0.5
+        if '名称' in df.columns:
+            df = df[~df['名称'].str.contains(r'\*?ST', na=False, regex=True)]
+        print(f"[SIZER] Loaded {len(df)} picks from stock CSV (last resort)")
+        return df.head(10)
+    return None
+
+
+def main():
+    print(f"{'='*50}")
+    print(f"  仓位管理引擎 v1 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*50}")
+
+    # 1. 检测市场状态
+    print("\n[1/4] Detecting market regime...")
+    idx = fetch_hs300_data()
+    regime, info = detect_market_regime(idx)
+    alloc = REGIME_ALLOCATION.get(regime, 0)
+    print(f"  Regime: {regime} | Allocation: {alloc*100:.0f}%")
+    if info.get('price'):
+        print(f"  HS300: {info['price']} | MA20: {info['ma20']} | MA60: {info['ma60']}")
+
+    # 2. 加载选股结果
+    print("\n[2/4] Loading latest picks...")
+    picks = load_latest_picks()
+    if picks is None or len(picks) == 0:
+        print("[SIZER] No picks available, generating empty orders")
+        picks = pd.DataFrame()
+    else:
+        print(f"  Loaded {len(picks)} picks")
+
+    # 3. 计算仓位
+    print("\n[3/4] Calculating position sizes...")
+    orders, summary = calculate_position_sizes(picks, regime)
+
+    if orders:
+        # 计算止损
+        hf = os.path.join(DATA_DIR, 'history.csv')
+        hist = pd.read_csv(hf, dtype={'代码': str}) if os.path.exists(hf) else None
+        orders = calculate_stop_loss(hist, orders)
+        print(f"  {len(orders)} orders generated")
+
+        # v7.5: 日内偏离检测（基于60分钟K线，带降级回退）
+        try:
+            from fetch_minute_kline import load_minute_data, calc_intraday_deviation, is_minute_degraded
+            degraded = is_minute_degraded()
+            checked = 0
+            for order in orders:
+                mdf = load_minute_data(order['代码'])
+                if mdf is not None and len(mdf) > 0:
+                    advice = calc_intraday_deviation(mdf)
+                    if advice:
+                        order['日内偏离%'] = advice['偏离%']
+                        order['日内建议'] = advice['建议']
+                        checked += 1
+                elif degraded:
+                    # 降级回退：使用前一日收盘价 vs 当日开盘价跳空幅度
+                    gap_advice = calc_gap_deviation(order['代码'], order['价格'], hist)
+                    if gap_advice:
+                        order['日内偏离%'] = gap_advice['gap_pct']
+                        order['日内建议'] = gap_advice['advice']
+                        checked += 1
+            if degraded:
+                print(f"  Intraday: {checked}/{len(orders)} stocks (gap-based fallback, minute K-line degraded)")
+            else:
+                print(f"  Intraday deviation checked for {checked}/{len(orders)} stocks")
+        except ImportError:
+            pass
+
+    # 4. 输出订单文件
+    print("\n[4/4] Generating order files...")
+    path = generate_order_file(orders, summary, info)
+
+    # 打印摘要
+    print(f"\n[OK] Position sizing complete")
+    print(f"  Market: {regime} ({summary['alloc_pct']*100:.0f}% invested)")
+    print(f"  Capital: {summary['investable']:,.0f} / {summary['total_capital']:,.0f}")
+    for o in orders:
+        dev_str = f" | 日内偏离{o.get('日内偏离%', 0):+.1f}%" if '日内偏离%' in o else ""
+        print(f"  {o['代码']} {o['名称']}: {o['股数']}股 @ {o['价格']} | 止损 {o.get('止损价', 'N/A')}{dev_str}")
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

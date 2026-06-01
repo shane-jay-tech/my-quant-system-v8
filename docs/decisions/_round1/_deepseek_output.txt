@@ -1,0 +1,102 @@
+我们通过对五个模块的逐行审查，按照“性能/算法/质量”“健康与正确性”“冗余”三个维度列出具体发现。
+
+---
+
+### 一、性能 / 算法 / 代码质量 / 可维护性优化
+
+1. **portfolio_risk.py**：每次调用 `load_history_returns` 都重新读取 `history.csv`，且未做缓存。当风控报告频繁生成时，会反复读取磁盘。  
+   → `load_history_returns` 函数，line 30 附近。  
+   建议：引入简单的字典缓存或单次加载。
+
+2. **walk_forward.py**：每个窗口的 `run_backtest_window` 都会调用 `calc_indicators(hist_df)` 重新计算全部指标，而 `walk_forward` 循环中又传入 `train_hist` 和 `test_hist` 子集，导致同一批数据多次计算指标。  
+   → `walk_forward` 函数中调用 `run_backtest_window` 处 (line 约 115)，以及 `run_backtest_window` 开头调用 `calc_indicators` (line 约 70)。  
+   建议：在 `walk_forward` 最外层一次性用全部历史计算 `hist_all = calc_indicators(hist_df)`，然后各窗口只传入对应日期的切片即可。
+
+3. **alpha_gate.py**：`check_alpha_gate` 每次都会调用 `evaluate_etf_gate()`，该函数可能重新拉取或计算指数对比。若流水线执行频率高，可增加短期缓存（例如一个交易日内不重复拉取）。  
+   → `check_alpha_gate` 函数，line 约 130 调用 `evaluate_etf_gate()`。
+
+4. **portfolio_risk.py**：`check_drawdown` 和 `check_volatility_target` 都独立读取 `equity_curve.csv`，造成重复 I/O。  
+   → line 约 100 和 140。建议统一加载一次，由 `generate_risk_report` 传入。
+
+---
+
+### 二、系统健康与正确性问题（bug / 边界 / 决策错误）
+
+#### 🔴 必修（Critical – 可能导致资金损失或系统崩溃）
+
+1. **enhanced_backtest.py**：**滑点双重扣除，导致净收益严重低估**  
+   - 代码在入场和出场时已经按 `SLIPPAGE`（默认 0.001）双边调整了成交价：  
+     `entry = raw_entry * (1 + SLIPPAGE)`，`exit_px = sell_px * (1 - SLIPPAGE)`，  
+     这样算出的 `gross` 已扣除了双边固定滑点。  
+   - 之后计算 `net = gross - trade_cost`，而 `trade_cost` 来自 `cost_model.get_cost_by_mcap()`，**该函数内部又包含了按市值分档的双边滑点率**，导致滑点被计算了两次。  
+   - **影响**：回测净收益被大幅压降（尤其是小资金），会向用户错误展示“策略不能盈利”，直接导致错误决策。  
+   → 文件 `enhanced_backtest.py`，`backtest` 函数内，入场/出场价调整 (line 约 145‑175)，以及净收益计算 `net = gross - trade_cost` (line 约 190)。
+
+2. **enhanced_backtest.py**：**市场 regime 标签不匹配，动态单笔金额永远走 fallback**  
+   - 回测中 `regime_str` 使用“牛市”或“熊市/震荡”，而 `cost_model.compute_dynamic_notional` 内的 `REGIME_ALLOC` 使用的是“强牛/弱牛/震荡/弱熊/强熊”。  
+   - `REGIME_ALLOC.get('牛市', 0.40)` 永远返回默认的 0.40，即便在牛市也应使用 0.80 的分配比例。  
+   - **影响**：单笔交易额被低估（强牛本应 320 元，却被算成 160 元），从而使成本率比实际更高（例如中盘股从 2.85% 变 5%+），回测净收益失真。  
+   → `enhanced_backtest.py`，`backtest` 函数内 `regime_str` 赋值处 (line 约 125) 及 `compute_dynamic_notional(regime_str, n_pick)` 调用 (line 约 190)。
+
+3. **walk_forward.py**：**网格搜索的 MA_LONG 参数完全无效**  
+   - `run_backtest_window` 调用 `calc_indicators(hist_df)`，该函数内部使用的 `MA_LONG` 是模块级的全局变量（来自配置，固定 30）。  
+   - 回测筛选条件使用的是硬编码列名 `latest['MA20']`，而 `'MA20'` 永远是根据全局 30 日周期计算的；传入的 `params['MA_LONG']` 从未被使用。  
+   - **影响**：Walk‑Forward 报告的“最优参数”以及过拟合比例是基于虚假的 MA_LONG 搜索结果，用户可能据此调参并实盘亏损。  
+   → `walk_forward.py`：`run_backtest_window` 调用 `calc_indicators(hist_df)` (line 约 70)，以及筛选 `latest['MA5'] > latest['MA20']` (line 约 85)。
+
+4. **alpha_gate.py**：**同一天多次运行会重复累加 “severe days” 计数，导致错误暂停**  
+   - `check_alpha_gate` 中遇到 `severity == 'severe'` 时直接 `consecutive_severe_days += 1`，没有检查当天是否已经计过。若流水线在同一天执行多次（例如不同阶段调用），会在一个交易日内把计数器拉满 5 天，触发暂停。  
+   - **影响**：策略可能在远未满足“连续 5 个交易日跑输”的情况下被强制暂停，切断买入操作，资金可能错失行情。  
+   → `alpha_gate.py`，`check_alpha_gate` 函数内计数递增逻辑 (line 约 165)。
+
+---
+
+#### 🟡 建议修（Quality – 损害正确性但不致命）
+
+5. **portfolio_risk.py**：**VaR 的参数法公式可能高估风险**  
+   - 代码使用 `abs(port_mean - z * port_std)`，当组合预期日收益 `port_mean` 较大时（尽管通常是微正），`abs(port_mean - z*std)` 可能得到比实际最大损失更大的值（例如均值 0.5%，z·std=1%，abs(0.5% - 1%) = 0.5%，而真正 VaR 应是 1%‑0.5%=0.5%，碰巧相等；但若均值>z·std，abs 变成均值‑z·std，表示的是收益而非损失）。  
+   - **影响**：风控数值有轻微偏差，极端情况可能低估风险。  
+   → `portfolio_risk.py`，`calc_portfolio_var` 函数，参数法部分 (line 约 85)。
+
+6. **enhanced_backtest.py**：**使用今日流通市值作为历史回测筛选条件，引入 survivalship bias**  
+   - `mcap = dict(zip(today_df['代码'], today_df['流通市值']))` 取的是最新股票数据，而回测历史日期时，流通市值已经变化，且有些股票可能已退市，被错误过滤掉。  
+   - **影响**：回测结果偏乐观（排除了历史上差股票）。但由于真实操作也会用最新数据，如不做解释可能误导。  
+   → `enhanced_backtest.py`，`backtest` 函数开头取 `mcap` (line 约 90)。
+
+7. **walk_forward.py**：**简化回测中的动量因子与主策略不一致**  
+   - `run_backtest_window` 只用 `ret_5d` 排序，而主回测用了 `ret_1d*0.5 + ret_3d*0.3 + ret_5d*0.2`，这会导致网格搜索得到的最优参数在真实策略中并非最优。  
+   → `walk_forward.py`，`run_backtest_window` 动量计算 (line 约 95)。
+
+8. **alpha_gate.py**：**状态文件损坏时回退到空白状态，可能导致正在暂停的系统恢复**  
+   - `_load_state` 遇到 JSON 错误时返回 `_blank_state()`，此时 `paused` 变为 `False`，若之前已暂停，将被意外重置。虽然已有 try/catch，但应记录日志并警告。  
+   → `alpha_gate.py`，`_load_state` 函数 (line 约 80)。
+
+---
+
+### 三、冗余 / 死代码 / 可合并模块
+
+1. **enhanced_backtest.py**：**全局 SLIPPAGE 调整逻辑与成本模型冲突，构成冗余**  
+   - 因为成本已统一由 `cost_model` 计算，入场/出场滑点调整代码 `raw_entry * (1 + SLIPPAGE)` 应该完全移除，否则会造成上述 double‑count bug。该 `SLIPPAGE` 变量及所有相关计算属于冗余且错误代码。  
+   → `enhanced_backtest.py`，`SLIPPAGE` 定义 (line 约 20)、入场/出场价格调整 (line 145‑175)。
+
+2. **walk_forward.py**：**run_backtest_window 内含有大量与 enhanced_backtest.backtest 重复的逻辑**（指标计算、候选筛选、动量排序、持有期收益计算）。虽为简化仿真，但可考虑抽离共用函数（如 `calc_indicators_with_param`），减少维护时两边不同步的风险。  
+   → 整个 `run_backtest_window` 函数 (line 约 55‑110) 与主回测有显著重叠。
+
+3. **cost_model.py**：`get_cost_by_mcap` 仅是为了兼容旧调用而存在的薄封装，如果所有调用者都改用 `round_trip_cost`，此函数可简化或标记废弃。  
+   → `cost_model.py`，`get_cost_by_mcap` 函数 (line 约 140)。
+
+4. **portfolio_risk.py**：`generate_risk_report` 中调用了 `check_drawdown`、`check_volatility_target` 等多个函数，它们各自独立读取文件，可合并到一个“资产曲线加载器”中。  
+   → 一系列读文件操作散布在 line 100‑150。
+
+---
+
+### 分级总结
+
+| 级别 | 数量 | 涉及文件 | 主要问题 |
+|------|------|----------|----------|
+| 🔴 必修 | 4 | enhanced_backtest, walk_forward, alpha_gate | 双重扣滑点、regime 不匹配、walk‑forward MA 无效、重复计数误暂停 |
+| 🟡 建议修 | 4 | portfolio_risk, enhanced_backtest, walk_forward, alpha_gate | VaR 公式偏差、回测市值 survivorship、简化动量差异、状态容灾 |
+| ⚪ 可不修 | 4 | portfolio_risk, walk_forward, cost_model, enhanced_backtest | 反复 I/O、重复计算指标、旧兼容封装、硬编码性价比小 |
+
+**立即修复优先级：** 1) 去除 enhanced_backtest 中的 SLIPPAGE 调整并修正 regime 标签；2) 修正 walk_forward 使 MA_LONG 参数真正生效；3) alpha_gate 添加同一交易日的去重逻辑。
+EXIT_DS=0

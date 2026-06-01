@@ -1,0 +1,46 @@
+[llm_call] role 'kimi' only supports temperature=1.0, overriding caller value 0.3.
+[llm_call] network error (RemoteProtocolError), retry 1/2 in 2s...
+1. **M8 除零与先 round 后算止损的级联误差**  
+   `exit_advisor.py: weighted_price/stop_loss`  
+   `total_shares` 无空队列保护，历史买入为空即 ZeroDivision；且先 `round(weighted_price,4)` 再算 `stop_loss`，四舍五入误差会向下游放大，极端行情可能差 1 分钱导致止损未触发或误触发。  
+   **修法**：加 `if total_shares == 0: continue`；`stop_loss` 基于原始 `weighted_price` 计算，最终结果再 round。
+
+2. **M2 静态 per-share 摊销的 round-trip 浮点残差**  
+   `strategy_feedback.py: buy_fee_per_share`  
+   `head['total_fee']/head['original_shares']` 作为静态分母，多次卖出时累加 `buy_fee_per_share*take` 因 IEEE 754 精度未必严格等于 `total_fee`（如 5 元分 3 次摊销可能出现 0.0001 元残差），导致该笔总 PnL 漂移。  
+   **修法**：队列中改持 `fee_left`，每次卖出扣 `fee_left * take / shares_left`，末笔把剩余 fee 清零，确保严格归零。
+
+3. **M6 非交易日/补跑信号死锁**  
+   `position_sizer.py: today_path` / `parsers.py`  
+   周日或节假日 catch-up 时 `today_path` 永不存在，系统直接返回 `[]`，周五生成的 exit signals 被静默丢弃，风控指令漏执行。  
+   **修法**：增加 fallback 扫描 `results/exit_advisor_*.json`，取最近 3 个交易日内最新文件，加载时打 `stale` warning 并记录落后天数。
+
+4. **M7 cfg 字符串转 bool 陷阱**  
+   `strategy_feedback.py: alert_only_default`  
+   `bool(cfg_get(...))` 若配置层返回字符串 `"False"`、`"0"`、空串，结果恒为 `True`，配置语义完全失效。  
+   **修法**：显式解析 `str(cfg_get('feedback.alert_only', 'true')).lower() in ('true', '1', 'yes')`。
+
+5. **M9 裸 except 静默吞异常 + lite/full 路径不对称**  
+   `sim_trade.py: full 非交易日分支`  
+   `try-except Exception` 会吞掉 IO、DB、数据格式错误；且 `_main_lite` 未必同步了非交易日 `update_equity_curve` 逻辑，同一系统两种入口行为再次分叉。  
+   **修法**：改为捕获特定异常（`IOError`, `ValueError`），其余向上抛；立即检查 `_main_lite` 同位置代码，保持双路径一致。
+
+6. **M1 未覆盖区间把节假日当交易日**  
+   `utils/calendar.py: count_trading_days`  
+   本地数据未覆盖段回退到 `_weekday_count`，未剔除公众假期，跨春节/国庆的交易日统计将系统性偏大，影响仓位计算或费用估算。  
+   **修法**：未覆盖区间返回 `None` 或接入交易所交易日历 API，不再用纯工作日近似。
+
+7. **FIFO 双胞胎代码重复**  
+   `strategy_feedback.py` + `exit_advisor.py`  
+   M2 摊销逻辑、M8 除零防护、队列字段约定在两处硬编码，未来必出现改一头忘一头。  
+   **修法**：抽取公共 `_fifo_consume(buy_queue, sell_price, sell_shares, sell_fee)` 到 `utils/trade_fifo.py`，两模块统一调用。
+
+8. **M3 cost_basis 分母与 pnl 口径不一致**  
+   `strategy_feedback.py: cost_basis`  
+   `pnl_amount` 已双边扣除买卖费用，但 `cost_basis` 仅含买入费，分母偏小导致 `pnl_pct` 系统性高估真实收益。  
+   **修法**：`cost_basis = entry_p*take + buy_fee_per_share*take + sell_fee_per_share*take`，使分母与净盈亏口径一致。
+
+9. **M5 脏方向记录导致 buy_queue 残存**  
+   `strategy_feedback.py: _dir_rank`  
+   非法方向 `fillna(2)` 被排到末尾，此前同标的买入已入队，但同组真实卖出因脏数据（空格、大小写）被跳过，`buy_queue` 残存至后续交易日，导致 FIFO 匹配错位。  
+   **修法**：排序前断言 `assert set(df['方向'].unique()).issubset({'买入','卖出'})`，脏数据立即抛异常而非静默归档。

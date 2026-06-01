@@ -1,0 +1,1775 @@
+"""
+数据接入层 v1 — 基本面 + 资金流 + 宏观代理
+
+功能：
+1. 通过 AKShare 获取财务指标（ROE、净利润增速、经营现金流）
+2. 北向资金持股数据
+3. 个股主力资金流向
+4. 宏观情绪代理（涨跌停家数、HS300 波动率）
+
+设计原则：
+- 本地缓存（data/cache/），当日数据不复采
+- 失败降级：任何接口异常返回空 DataFrame，不阻塞选股流水线
+- 统一列名输出，与 strategy.py 无缝集成
+"""
+import os, sys, json, time
+from datetime import datetime, timedelta
+
+import pandas as pd
+import numpy as np
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+CACHE_DIR = os.path.join(DATA_DIR, 'cache')
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# v7.6: 统一配置中心
+sys.path.insert(0, BASE_DIR)
+from core.config import get as cfg_get
+
+# ---------- 缓存工具 ----------
+
+def _cache_path(name):
+    today = datetime.now().strftime('%Y%m%d')
+    return os.path.join(CACHE_DIR, f'{name}_{today}.csv')
+
+
+def _load_cache(name):
+    p = _cache_path(name)
+    if os.path.exists(p):
+        return pd.read_csv(p, dtype={'代码': str})
+    return None
+
+
+def _save_cache(name, df):
+    if df is None or len(df) == 0:
+        return
+    p = _cache_path(name)
+    df.to_csv(p, index=False, encoding='utf-8-sig')
+
+
+# ---------- 基本面数据 ----------
+
+def load_fundamental_data(codes=None):
+    """
+    获取最新财务指标。
+    返回 DataFrame: 代码, 名称, ROE, 净利润增速(%), 营收增速(%), 经营现金流(亿), 负债率(%)
+    """
+    cached = _load_cache('fundamental')
+    if cached is not None:
+        print('[DATA] Fundamental cache hit')
+        if codes is not None:
+            cached = cached[cached['代码'].isin(codes)]
+        return cached
+
+    try:
+        import akshare as ak
+    except ImportError:
+        print('[DATA] akshare not installed, skip fundamental')
+        return pd.DataFrame()
+
+    print('[DATA] Fetching fundamental data via akshare...')
+    rows = []
+    # 使用 stock_financial_report_sina 或 stock_yjbb_em（业绩快报）
+    try:
+        # 业绩报表（最新季度）
+        df_yjbb = ak.stock_yjbb_em(date=datetime.now().strftime('%Y%m%d'))
+        if df_yjbb is not None and len(df_yjbb) > 0:
+            # 统一列名（不同 akshare 版本列名可能有差异）
+            col_map = {
+                '股票代码': '代码',
+                '股票简称': '名称',
+                '净资产收益率': 'ROE',
+                '净资产收益率(%)': 'ROE',
+                '净利润同比增长率': '净利润增速',
+                '净利润同比增长率(%)': '净利润增速',
+                '营业收入同比增长率': '营收增速',
+                '营业收入同比增长率(%)': '营收增速',
+                '每股经营现金流量': '每股现金流',
+                '负债合计': '负债合计',
+                '资产总计': '资产总计',
+            }
+            df_yjbb = df_yjbb.rename(columns={k: v for k, v in col_map.items() if k in df_yjbb.columns})
+            if '代码' in df_yjbb.columns:
+                df_yjbb['代码'] = df_yjbb['代码'].astype(str).str.zfill(6)
+                # 计算负债率
+                if '负债合计' in df_yjbb.columns and '资产总计' in df_yjbb.columns:
+                    df_yjbb['负债率'] = df_yjbb['负债合计'] / df_yjbb['资产总计'] * 100
+                # 筛选需要的列
+                keep = ['代码', '名称', 'ROE', '净利润增速', '营收增速', '每股现金流', '负债率']
+                available = [c for c in keep if c in df_yjbb.columns]
+                df_out = df_yjbb[available].copy()
+                # 数值清洗
+                for c in ['ROE', '净利润增速', '营收增速', '负债率']:
+                    if c in df_out.columns:
+                        df_out[c] = pd.to_numeric(df_out[c], errors='coerce')
+                _save_cache('fundamental', df_out)
+                if codes is not None:
+                    df_out = df_out[df_out['代码'].isin(codes)]
+                print(f'[DATA] Fundamental loaded: {len(df_out)} stocks')
+                return df_out
+    except Exception as e:
+        print(f'[DATA] Fundamental fetch failed: {e}')
+
+    return pd.DataFrame()
+
+
+# ---------- 资金流数据 ----------
+
+def load_north_flow(codes=None):
+    """
+    北向资金（陆股通）持股数据。
+    返回 DataFrame: 代码, 北向持股(万股), 北向占比(%), 北向5日净买入(万股)
+    """
+    cached = _load_cache('north_flow')
+    if cached is not None:
+        print('[DATA] North flow cache hit')
+        if codes is not None:
+            cached = cached[cached['代码'].isin(codes)]
+        return cached
+
+    try:
+        import akshare as ak
+    except ImportError:
+        print('[DATA] akshare not installed, skip north flow')
+        return pd.DataFrame()
+
+    print('[DATA] Fetching north flow via akshare...')
+    try:
+        # 沪深港通持股
+        df_north = ak.stock_gdfx_free_holding_detail_em()
+        if df_north is not None and len(df_north) > 0:
+            # 列名适配
+            col_map = {
+                '股票代码': '代码',
+                '股票简称': '名称',
+                '持股数量': '北向持股',
+                '持股数量(股)': '北向持股',
+                '占总股本比例': '北向占比',
+                '占总股本比例(%)': '北向占比',
+            }
+            df_north = df_north.rename(columns={k: v for k, v in col_map.items() if k in df_north.columns})
+            if '代码' in df_north.columns:
+                df_north['代码'] = df_north['代码'].astype(str).str.zfill(6)
+                keep = ['代码', '北向持股', '北向占比']
+                available = [c for c in keep if c in df_north.columns]
+                df_out = df_north[available].copy()
+                for c in ['北向持股', '北向占比']:
+                    if c in df_out.columns:
+                        df_out[c] = pd.to_numeric(df_out[c], errors='coerce')
+                _save_cache('north_flow', df_out)
+                if codes is not None:
+                    df_out = df_out[df_out['代码'].isin(codes)]
+                print(f'[DATA] North flow loaded: {len(df_out)} stocks')
+                return df_out
+    except Exception as e:
+        print(f'[DATA] North flow fetch failed: {e}')
+
+    return pd.DataFrame()
+
+
+def load_fund_flow_individual(codes=None):
+    """
+    个股主力资金流向（当日）。
+    返回 DataFrame: 代码, 主力净流入(亿), 主力净流入占比(%)
+    """
+    cached = _load_cache('fund_flow')
+    if cached is not None:
+        print('[DATA] Fund flow cache hit')
+        if codes is not None:
+            cached = cached[cached['代码'].isin(codes)]
+        return cached
+
+    try:
+        import akshare as ak
+    except ImportError:
+        print('[DATA] akshare not installed, skip fund flow')
+        return pd.DataFrame()
+
+    print('[DATA] Fetching fund flow via akshare...')
+    try:
+        # 个股资金流向
+        df_flow = ak.stock_fund_flow_individual()
+        if df_flow is not None and len(df_flow) > 0:
+            col_map = {
+                '代码': '代码',
+                '名称': '名称',
+                '主力净流入-净额': '主力净流入',
+                '主力净流入-净占比': '主力净流入占比',
+            }
+            df_flow = df_flow.rename(columns={k: v for k, v in col_map.items() if k in df_flow.columns})
+            if '代码' in df_flow.columns:
+                df_flow['代码'] = df_flow['代码'].astype(str).str.zfill(6)
+                keep = ['代码', '主力净流入', '主力净流入占比']
+                available = [c for c in keep if c in df_flow.columns]
+                df_out = df_flow[available].copy()
+                for c in ['主力净流入', '主力净流入占比']:
+                    if c in df_out.columns:
+                        df_out[c] = pd.to_numeric(df_out[c], errors='coerce')
+                _save_cache('fund_flow', df_out)
+                if codes is not None:
+                    df_out = df_out[df_out['代码'].isin(codes)]
+                print(f'[DATA] Fund flow loaded: {len(df_out)} stocks')
+                return df_out
+    except Exception as e:
+        print(f'[DATA] Fund flow fetch failed: {e}')
+
+    return pd.DataFrame()
+
+
+# ---------- 宏观情绪代理 ----------
+
+def load_market_sentiment():
+    """
+    市场情绪代理指标：
+    - 当日涨停家数 / 跌停家数
+    - HS300 近 20 日波动率
+    - 上涨家数 / 下跌家数
+
+    返回 dict
+    """
+    try:
+        import akshare as ak
+    except ImportError:
+        return {}
+
+    print('[DATA] Fetching market sentiment...')
+    result = {}
+    try:
+        # 涨跌停家数
+        df_zdt = ak.stock_zt_pool_em(date=datetime.now().strftime('%Y%m%d'))
+        if df_zdt is not None:
+            result['涨停家数'] = len(df_zdt)
+    except Exception:
+        pass
+
+    try:
+        df_dt = ak.stock_zt_pool_dtgc_em(date=datetime.now().strftime('%Y%m%d'))
+        if df_dt is not None:
+            result['跌停家数'] = len(df_dt)
+    except Exception:
+        pass
+
+    try:
+        # 涨跌分布
+        df_zdfbx = ak.stock_zdfx_em()
+        if df_zdfbx is not None and '上涨家数' in df_zdfbx.columns:
+            result['上涨家数'] = int(df_zdfbx['上涨家数'].iloc[0]) if len(df_zdfbx) > 0 else 0
+            result['下跌家数'] = int(df_zdfbx['下跌家数'].iloc[0]) if len(df_zdfbx) > 0 else 0
+    except Exception:
+        pass
+
+    # HS300 波动率（从本地数据计算）
+    hs300_path = os.path.join(DATA_DIR, 'hs300_index.csv')
+    if os.path.exists(hs300_path):
+        try:
+            df_hs = pd.read_csv(hs300_path)
+            df_hs['日期'] = pd.to_datetime(df_hs['日期'])
+            df_hs = df_hs.sort_values('日期')
+            if len(df_hs) >= 20:
+                ret = df_hs['收盘'].pct_change().dropna()
+                result['hs300_vol20'] = round(ret.tail(20).std() * np.sqrt(252) * 100, 2)
+        except Exception:
+            pass
+
+    print(f'[DATA] Sentiment: {result}')
+    return result
+
+
+# ---------- 统一合并接口 ----------
+
+def load_all_factors(codes=None):
+    """
+    统一加载所有外部因子，合并为单张宽表。
+    供 strategy.py / multi_strategy.py 调用。
+
+    Returns:
+        pd.DataFrame: 以 代码 为 key 的宽表，列包含所有可用因子
+    """
+    dfs = []
+
+    f1 = load_fundamental_data(codes)
+    if len(f1) > 0:
+        dfs.append(f1.set_index('代码'))
+
+    f2 = load_north_flow(codes)
+    if len(f2) > 0:
+        dfs.append(f2.set_index('代码'))
+
+    f3 = load_fund_flow_individual(codes)
+    if len(f3) > 0:
+        dfs.append(f3.set_index('代码'))
+
+    if not dfs:
+        return pd.DataFrame()
+
+    merged = dfs[0]
+    for d in dfs[1:]:
+        merged = merged.join(d, how='outer', rsuffix='_dup')
+        # 去除重复名称列
+        dup_cols = [c for c in merged.columns if '_dup' in c]
+        merged = merged.drop(columns=dup_cols, errors='ignore')
+
+    merged = merged.reset_index()
+    # 去重：同名保留第一个
+    if '名称' in merged.columns:
+        merged = merged.drop_duplicates(subset=['代码'], keep='first')
+    print(f'[DATA] All factors merged: {len(merged)} stocks, {len(merged.columns)} cols')
+    return merged
+
+
+# ---------- 调试入口 ----------
+if __name__ == '__main__':
+    print(f"{'='*50}")
+    print(f"  数据接入层测试 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*50}")
+    df = load_all_factors()
+    print(df.head())
+    sentiment = load_market_sentiment()
+    print(sentiment)
+"""
+历史日线数据下载（过去60个交易日）
+使用新浪财经 K 线 API + 多线程加速
+数据保存到 data/history.csv，支持增量更新
+"""
+import requests
+import time
+import random
+import os
+import sys
+import json
+import pandas as pd
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+
+# ========== 配置 ==========
+HISTORY_DAYS = 60
+# v8.5+: 8线程 + 0.2s 延迟会触发 Sina 456 限流（实测 4400 只里 3870 失败）
+# 降至 3线程 + 0.5-1.0s 延迟 ≈ 3 req/s 总量，稳过 Sina 频率门槛；
+# 损失约 50% 速度但保住成功率，对每天 ≤4500 只增量更新足够（~25min 完成）
+MAX_WORKERS = 3
+REQUEST_DELAY = (0.5, 1.0)
+MAX_RETRIES = 3
+BATCH_SAVE_INTERVAL = 50  # 每50只股票保存一次进度——避免 5 分钟跑了一半却没写盘
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+HISTORY_FILE = os.path.join(DATA_DIR, 'history.csv')
+
+# 线程安全锁（写文件用）
+write_lock = Lock()
+
+# ========== 反反爬配置 ==========
+HEADERS_TEMPLATES = [
+    {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.sina.com.cn/',
+    },
+    {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': 'https://money.finance.sina.com.cn/',
+    },
+]
+
+
+def get_random_headers():
+    return random.choice(HEADERS_TEMPLATES).copy()
+
+
+# ========== 反反爬：指数退避请求 ==========
+# Sina 的限流状态码：403 = IP/UA 拦截，456 = 速率超限，429 = 标准限流
+RATE_LIMIT_CODES = {403, 429, 456}
+
+
+def request_with_backoff(url, params, max_retries=MAX_RETRIES):
+    """带指数退避的请求
+
+    v8.5+: 显式识别 Sina 的 456（频率超限）；它和 403 同等需要长退避。
+    早期版本只对 403 退避，遇到 456 时只睡 1s 就重试，结果反复触发 → 看起来"卡住"实则被封禁。
+    """
+    for attempt in range(max_retries):
+        try:
+            time.sleep(random.uniform(*REQUEST_DELAY))
+            resp = requests.get(url, params=params, headers=get_random_headers(), timeout=20)
+            if resp.status_code == 200:
+                resp.encoding = 'utf-8'
+                return resp
+            if resp.status_code in RATE_LIMIT_CODES:
+                # 指数退避，最多 16 秒，让 Sina 的限流窗口冷却
+                backoff = min(2 ** (attempt + 1), 16)
+                time.sleep(backoff)
+            else:
+                time.sleep(1)
+        except Exception:
+            time.sleep(2 ** (attempt + 1))
+    return None
+
+
+# ========== 股票代码格式转换 ==========
+def code_to_sina_symbol(code):
+    """将6位代码转为新浪格式：sh600000, sz000001, bj920000
+
+    v8.6: 增加 ETF 前缀支持
+        沪市 ETF: 51xxxx / 52xxxx / 56xxxx / 58xxxx / 588xxx → sh
+        深市 ETF: 15xxxx / 159xxx / 16xxxx / 18xxxx       → sz
+    """
+    code = str(code).zfill(6)
+    # 沪市：6xx 主板 / 5xx ETF 等
+    if code[0] in ('5', '6'):
+        return f'sh{code}'
+    # 深市：0xx 主板 / 3xx 创业板 / 1xx (含 159xxx ETF) / 2xx B股
+    if code[0] in ('0', '1', '2', '3'):
+        return f'sz{code}'
+    # 北交所：8xx / 9xx
+    if code[0] in ('8', '9'):
+        return f'bj{code}'
+    return f'sz{code}'
+
+
+# ========== 获取单只股票历史数据 ==========
+def fetch_one_stock_history(code):
+    """
+    获取单只股票历史日线数据
+    返回 DataFrame 或 None（失败时）
+    """
+    symbol = code_to_sina_symbol(code)
+
+    url = 'https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData'
+    params = {
+        'symbol': symbol,
+        'scale': '240',  # 日K
+        'ma': 'no',
+        'datalen': str(HISTORY_DAYS + 10),  # 多取一些防止不足
+    }
+
+    resp = request_with_backoff(url, params)
+    if not resp:
+        return None
+
+    try:
+        data = resp.json()
+    except json.JSONDecodeError:
+        return None
+
+    if not data or len(data) == 0:
+        return None
+
+    records = []
+    for d in data:
+        try:
+            records.append({
+                '代码': code,
+                '日期': d.get('day', ''),
+                '开盘': float(d.get('open', 0) or 0),
+                '最高': float(d.get('high', 0) or 0),
+                '最低': float(d.get('low', 0) or 0),
+                '收盘': float(d.get('close', 0) or 0),
+                '成交量': float(d.get('volume', 0) or 0),
+            })
+        except (ValueError, TypeError):
+            continue
+
+    if len(records) < 5:  # 数据太少不值得保留
+        return None
+
+    return pd.DataFrame(records)
+
+
+# ========== 增量更新逻辑 ==========
+def get_existing_codes():
+    """检查已存在的历史数据，返回已覆盖的股票代码集合"""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            existing = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
+            return set(existing['代码'].unique())
+        except Exception:
+            return set()
+    return set()
+
+
+def save_increment(df_new, mode='a'):
+    """增量保存 CSV"""
+    with write_lock:
+        header = not os.path.exists(HISTORY_FILE) or mode == 'w'
+        df_new.to_csv(HISTORY_FILE, mode=mode, index=False,
+                      encoding='utf-8-sig', header=header)
+
+
+# ========== 主流程 ==========
+def main():
+    print(f"{'='*50}")
+    print(f"  历史数据下载器启动 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  目标：过去 {HISTORY_DAYS} 个交易日，{MAX_WORKERS} 线程并发")
+    print(f"{'='*50}")
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    # Step 1: 获取需要下载的股票代码列表
+    # 从当日数据中读取所有 A 股代码
+    today = datetime.now().strftime('%Y%m%d')
+    today_file = os.path.join(DATA_DIR, f'stock_{today}.csv')
+
+    if not os.path.exists(today_file):
+        # 尝试找最新的 stock_*.csv
+        import glob
+        pattern = os.path.join(DATA_DIR, 'stock_*.csv')
+        files = sorted(glob.glob(pattern), reverse=True)
+        if not files:
+            print("[FATAL] No stock data file found. Run fetch_stock_data.py first.")
+            sys.exit(1)
+        today_file = files[0]
+        print(f"[INFO] Using stock list from: {today_file}")
+
+    stock_df = pd.read_csv(today_file, dtype={'代码': str})
+    all_codes = stock_df['代码'].unique().tolist()
+    print(f"[INFO] {len(all_codes)} stocks to process")
+
+    # Step 2 (v8.5): 按"每只股票最新日期"判断增量——治本三件套
+    # ① 不再仅看"代码是否存在"；改为看"该股票最新日期 < 目标日期"
+    # ② 不再 os.rename 破坏性删除旧文件；走最终去重合并
+    # ③ Sina 拉失败时，旧数据完整保留——不会股票池缩水
+    import re
+    m = re.search(r'stock_(\d{8})\.csv', os.path.basename(today_file))
+    if m:
+        yyyymmdd = m.group(1)
+        target_date_str = f'{yyyymmdd[0:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}'
+    else:
+        target_date_str = datetime.now().strftime('%Y-%m-%d')
+
+    # 读取已有 history.csv，构建 {代码: 最新日期} 映射
+    existing_full = None
+    latest_by_code = {}
+    if os.path.exists(HISTORY_FILE):
+        try:
+            existing_full = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
+            if not existing_full.empty:
+                latest_by_code = existing_full.groupby('代码')['日期'].max().to_dict()
+        except Exception as e:
+            print(f"[WARN] Failed to read existing history: {e}")
+            existing_full = None
+
+    # 需要拉的股票 = 全新 + 旧但日期落后
+    new_codes = [c for c in all_codes if c not in latest_by_code]
+    stale_codes = [c for c in all_codes
+                   if c in latest_by_code and latest_by_code[c] < target_date_str]
+    codes_to_fetch = list(dict.fromkeys(new_codes + stale_codes))   # 保序去重
+
+    if len(codes_to_fetch) == 0:
+        print(f"[OK] History up-to-date (all {len(all_codes)} stocks ≥ {target_date_str})")
+        return 0
+
+    print(f"[INFO] Target date: {target_date_str}")
+    print(f"[INFO] Need to fetch: {len(codes_to_fetch)} stocks")
+    print(f"       new (no record): {len(new_codes)}")
+    print(f"       stale (date < target): {len(stale_codes)}")
+    print(f"       up-to-date: {len(all_codes) - len(codes_to_fetch)} (skipped)")
+
+    # Step 3: 多线程并发下载
+    success_count = 0
+    fail_count = 0
+    buffer = []  # 缓存批量写入
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_code = {
+            executor.submit(fetch_one_stock_history, code): code
+            for code in codes_to_fetch
+        }
+
+        for i, future in enumerate(as_completed(future_to_code)):
+            code = future_to_code[future]
+            try:
+                df = future.result()
+                if df is not None and len(df) > 0:
+                    buffer.append(df)
+                    success_count += 1
+                else:
+                    fail_count += 1
+            except Exception:
+                fail_count += 1
+
+            # 批量保存
+            if len(buffer) >= BATCH_SAVE_INTERVAL:
+                combined = pd.concat(buffer, ignore_index=True)
+                save_increment(combined)
+                buffer = []
+                print(f"[PROGRESS] {i+1}/{len(codes_to_fetch)} processed, "
+                      f"{success_count} OK, {fail_count} FAIL")
+
+    # Step 4: 保存剩余缓冲
+    if buffer:
+        combined = pd.concat(buffer, ignore_index=True)
+        save_increment(combined)
+
+    print(f"\n{'='*50}")
+    print(f"  [DONE] Download complete!")
+    print(f"  Success: {success_count} stocks")
+    print(f"  Failed: {fail_count} stocks")
+    print(f"  Saved to: {HISTORY_FILE}")
+    print(f"{'='*50}")
+
+    # Step 4.5 (v8.5): 最终去重——把 stream-append 写入的多版本压平
+    # 必要时合并旧 existing_full（涵盖增量逻辑跳过的"日期已最新"股票）
+    try:
+        if os.path.exists(HISTORY_FILE):
+            disk_df = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
+        else:
+            disk_df = pd.DataFrame()
+        if existing_full is not None and not existing_full.empty:
+            # disk_df 含本次 stream-append 的内容；existing_full 是初始全部
+            # 拼接顺序：disk_df 在前（更新），保留新版本时优先它
+            merged = pd.concat([disk_df, existing_full], ignore_index=True)
+        else:
+            merged = disk_df
+        if not merged.empty:
+            merged = merged.drop_duplicates(subset=['代码', '日期'], keep='first')
+            merged = merged.sort_values(['代码', '日期']).reset_index(drop=True)
+            merged.to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        print(f"[WARN] Final dedupe failed: {e}（已保留原有数据，不会丢失）")
+
+    # Step 5: 验证数据
+    if os.path.exists(HISTORY_FILE):
+        final = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
+        unique_stocks = final['代码'].nunique()
+        date_range = f"{final['日期'].min()} ~ {final['日期'].max()}"
+        print(f"  Final: {len(final)} rows, {unique_stocks} unique stocks")
+        print(f"  Date range: {date_range}")
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+"""
+带自愈能力的全部 A 股当日行情爬虫
+主数据源：新浪财经 API → 备用：东方财富 → 最后：同花顺
+所有反反爬策略均从 books/反反爬实战笔记.md 中应用
+
+字段：代码、名称、最新价、涨跌幅、成交量、成交额、换手率、流通市值
+"""
+import requests
+import time
+import random
+import sys
+import os
+from datetime import datetime
+
+# ========== 反反爬：请求头伪装 ==========
+def get_sina_headers():
+    """新浪财经专用请求头"""
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://vip.stock.finance.sina.com.cn/',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Connection': 'close',
+    }
+
+
+def get_em_headers():
+    """东方财富专用请求头（备用源）"""
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': 'https://quote.eastmoney.com/',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Connection': 'close',
+    }
+
+
+# ========== 反反爬：指数退避重试 ==========
+def safe_request(url, params, headers, max_retries=3, label=""):
+    """带指数退避的请求函数，用于所有 API 调用"""
+    for attempt in range(max_retries):
+        try:
+            # 反反爬：随机延时 0.3-0.8 秒
+            time.sleep(random.uniform(0.3, 0.8))
+            resp = requests.get(url, params=params, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                return resp
+            if resp.status_code == 403:
+                print(f"[WARN] 403 Forbidden on {label}, attempt {attempt+1}/{max_retries}")
+            else:
+                print(f"[WARN] HTTP {resp.status_code} on {label}, attempt {attempt+1}/{max_retries}")
+            time.sleep(2 ** (attempt + 1))
+        except Exception as e:
+            wait = 2 ** (attempt + 1) + random.uniform(0, 1)
+            print(f"[RETRY] {label} attempt {attempt+1}/{max_retries}: {e}, waiting {wait:.1f}s")
+            time.sleep(wait)
+    return None
+
+
+# ========== 数据源 1：新浪财经 API（主） ==========
+def fetch_sina():
+    """
+    新浪财经 A 股行情接口（首选）
+    通过 /Market_Center.getHQNodeData 获取，JSON 格式，无需 HTML 解析
+    返回所有需要的字段：代码、名称、最新价、涨跌幅、成交量、成交额、换手率、流通市值
+    """
+    print("[SINA] Attempting to fetch from 新浪财经...")
+
+    url = 'https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData'
+    headers = get_sina_headers()
+
+    PAGE_SIZE = 100
+    all_stocks = []
+
+    # Step 1: 先获取第1页来确定总数
+    params = {
+        'page': '1',
+        'num': str(PAGE_SIZE),
+        'sort': 'symbol',
+        'asc': '1',
+        'node': 'hs_a',
+        'symbol': '',
+        '_s_r_a': 'init',
+    }
+
+    resp = safe_request(url, params, headers, label="Sina page 1")
+    if not resp:
+        print("[SINA] Failed to fetch page 1, trying backup...")
+        return None
+
+    resp.encoding = 'utf-8'
+    first_page = resp.json()
+
+    if not first_page or len(first_page) == 0:
+        print("[SINA] Empty page 1, trying backup...")
+        return None
+
+    all_stocks.extend(first_page)
+    print(f"[SINA] Page 1: {len(first_page)} stocks (total pages unknown, will paginate until empty)")
+
+    # Step 2: 循环获取剩余页面，直到返回空
+    page = 2
+    max_empty_pages = 3  # 连续空页数上限
+    empty_count = 0
+
+    while empty_count < max_empty_pages:
+        params['page'] = str(page)
+
+        resp = safe_request(url, params, headers, label=f"Sina page {page}")
+        if not resp:
+            # 网络错误后重试一次
+            time.sleep(3)
+            resp = safe_request(url, params, headers, label=f"Sina page {page} (retry)")
+            if not resp:
+                empty_count += 1
+                page += 1
+                continue
+
+        resp.encoding = 'utf-8'
+        try:
+            page_data = resp.json()
+        except Exception as e:
+            print(f"[SINA] Page {page} JSON parse error: {e}")
+            empty_count += 1
+            page += 1
+            continue
+
+        if not page_data or len(page_data) == 0:
+            empty_count += 1
+            page += 1
+            continue
+
+        all_stocks.extend(page_data)
+        empty_count = 0  # 重置空页计数
+
+        if page % 10 == 0:
+            print(f"[SINA] Progress: page {page}, {len(all_stocks)} stocks so far")
+
+        page += 1
+
+    if len(all_stocks) < 100:
+        print(f"[SINA] Only {len(all_stocks)} stocks, insufficient, trying backup...")
+        return None
+
+    print(f"[SINA] Success! Total: {len(all_stocks)} stocks from {page-1} pages.")
+
+    # Step 3: 转换为标准格式
+    result = []
+    for s in all_stocks:
+        try:
+            code = str(s.get('code', '')).zfill(6)
+            name = s.get('name', '')
+            if not code or not name:
+                continue
+
+            trade = float(s.get('trade', 0) or 0)
+            change_pct = float(s.get('changepercent', 0) or 0)
+            volume = float(s.get('volume', 0) or 0)
+            amount = float(s.get('amount', 0) or 0)
+            turnover = float(s.get('turnoverratio', 0) or 0)
+            nmc = float(s.get('nmc', 0) or 0) * 10000  # 新浪返回万元，转为元
+
+            row = {
+                '代码': code,
+                '名称': name,
+                '最新价': trade,
+                '涨跌幅': change_pct,
+                '成交量': volume,
+                '成交额': amount,
+                '换手率': turnover,
+                '流通市值': nmc,
+            }
+            result.append(row)
+        except (ValueError, TypeError) as e:
+            continue
+
+    print(f"[SINA] Parsed {len(result)} valid stock records.")
+    return result if result else None
+
+
+# ========== 数据源 2：东方财富 API（备用） ==========
+def fetch_eastmoney():
+    """
+    东方财富 API（备用源）
+    当新浪失败时自动切换
+    注意：可能因请求频率过高被临时封 IP
+    """
+    print("[EASTMONEY] Attempting to fetch from 东方财富（备用）...")
+
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    headers = get_em_headers()
+
+    FIELD_LIST = 'f2,f3,f5,f6,f7,f8,f12,f14,f20'
+    PAGE_SIZE = 100
+
+    # 第1页获取总数
+    params = {
+        'pn': '1', 'pz': str(PAGE_SIZE), 'po': '1', 'np': '1',
+        'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
+        'fltt': '2', 'invt': '2', 'fid': 'f3',
+        'fs': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',
+        'fields': FIELD_LIST,
+        '_': str(int(time.time() * 1000)),
+    }
+
+    resp = safe_request(url, params, headers, label="Eastmoney page 1")
+    if not resp:
+        print("[EASTMONEY] Failed to get page 1")
+        return None
+
+    try:
+        data = resp.json()
+    except Exception:
+        print("[EASTMONEY] JSON parse error")
+        return None
+
+    if 'data' not in data or not data['data']:
+        print("[EASTMONEY] Empty data")
+        return None
+
+    total = data['data'].get('total', 0)
+    if total == 0:
+        print("[EASTMONEY] total=0")
+        return None
+
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    print(f"[EASTMONEY] Total: {total} stocks, {total_pages} pages")
+
+    all_stocks = []
+
+    # Parse first page
+    for s in data['data'].get('diff', []):
+        all_stocks.append({
+            '代码': str(s.get('f12', '')).zfill(6),
+            '名称': s.get('f14', ''),
+            '最新价': float(s.get('f2', 0) or 0),
+            '涨跌幅': float(s.get('f3', 0) or 0),
+            '成交量': float(s.get('f5', 0) or 0),
+            '成交额': float(s.get('f6', 0) or 0),
+            '换手率': float(s.get('f7', 0) or 0),
+            '流通市值': float(s.get('f20', 0) or 0),
+        })
+
+    # Paginate remaining
+    for page in range(2, total_pages + 1):
+        params['pn'] = str(page)
+        params['_'] = str(int(time.time() * 1000))
+
+        resp = safe_request(url, params, headers, label=f"Eastmoney page {page}")
+        if not resp:
+            print(f"[EASTMONEY] Page {page} failed, skipping")
+            continue
+
+        try:
+            page_data = resp.json()
+            for s in page_data.get('data', {}).get('diff', []):
+                all_stocks.append({
+                    '代码': str(s.get('f12', '')).zfill(6),
+                    '名称': s.get('f14', ''),
+                    '最新价': float(s.get('f2', 0) or 0),
+                    '涨跌幅': float(s.get('f3', 0) or 0),
+                    '成交量': float(s.get('f5', 0) or 0),
+                    '成交额': float(s.get('f6', 0) or 0),
+                    '换手率': float(s.get('f7', 0) or 0),
+                    '流通市值': float(s.get('f20', 0) or 0),
+                })
+        except Exception as e:
+            print(f"[EASTMONEY] Page {page} parse error: {e}")
+            continue
+
+        if page % 10 == 0:
+            print(f"[EASTMONEY] Progress: {page}/{total_pages}")
+
+    if len(all_stocks) < 100:
+        return None
+    print(f"[EASTMONEY] Success! Got {len(all_stocks)} stocks")
+    return all_stocks
+
+
+# ========== 数据源 3：同花顺（最后备用） ==========
+def fetch_10jqka():
+    """
+    同花顺（最后备用源）
+    通过 HTML 页面解析股票数据
+    """
+    print("[10JQKA] Attempting to fetch from 同花顺（最后备用）...")
+
+    url = "https://q.10jqka.com.cn/index/index/board/all/field/zdf/order/desc/page/1/ajax/1/"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://q.10jqka.com.cn/',
+        'Connection': 'close',
+    }
+
+    import re
+    resp = safe_request(url, {}, headers, label="10jqka")
+    if not resp:
+        return None
+
+    html = resp.text
+    # 提取股票数据（同花顺页面结构）
+    pattern = r'<tr[^>]*>.*?<td[^>]*>(\d+)</td>.*?<td[^>]*>.*?">([^<]+)</a>.*?<td[^>]*>.*?">([^<]+)</td>.*?<td[^>]*>.*?">([^<]+)</td>.*?</tr>'
+    matches = re.findall(pattern, html, re.DOTALL)
+
+    result = []
+    for m in matches:
+        result.append({
+            '代码': m[0].zfill(6),
+            '名称': m[1],
+            '最新价': float(m[2]) if m[2] != '-' else 0,
+            '涨跌幅': float(m[3].replace('%', '')) if m[3] != '-' else 0,
+            '成交量': 0,
+            '成交额': 0,
+            '换手率': 0,
+            '流通市值': 0,
+        })
+
+    if len(result) < 100:
+        print(f"[10JQKA] Only {len(result)} stocks, insufficient")
+        return None
+
+    print(f"[10JQKA] Got {len(result)} stocks")
+    return result
+
+
+# ========== 主流程：多源自动切换 ==========
+def main():
+    print(f"{'='*50}")
+    print(f"  A股行情爬虫启动 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}")
+
+    today = datetime.now().strftime('%Y%m%d')
+
+    # 依次尝试三个数据源（自动故障转移）
+    sources = [
+        ('新浪财经', fetch_sina),
+        ('东方财富', fetch_eastmoney),
+        ('同花顺', fetch_10jqka),
+    ]
+
+    stocks = None
+    for source_name, fetch_func in sources:
+        try:
+            stocks = fetch_func()
+            if stocks and len(stocks) >= 100:
+                print(f"[OK] Successfully fetched {len(stocks)} stocks from {source_name}")
+                break
+            else:
+                print(f"[SWITCH] {source_name} returned insufficient data ({len(stocks) if stocks else 0}), switching...")
+                time.sleep(random.uniform(2, 4))
+        except Exception as e:
+            print(f"[ERROR] {source_name} failed with exception: {e}")
+            continue
+
+    if not stocks or len(stocks) == 0:
+        print("[FATAL] All data sources failed! No stock data available.")
+        sys.exit(1)
+
+    # 保存数据
+    import pandas as pd
+    df = pd.DataFrame(stocks)
+    df = df.drop_duplicates(subset=['代码'], keep='first')
+    df = df.sort_values('代码').reset_index(drop=True)
+
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f'stock_{today}.csv')
+    df.to_csv(output_path, index=False, encoding='utf-8-sig')
+
+    print(f"\n{'='*50}")
+    print(f"  [DONE] {len(df)} stocks saved to {output_path}")
+    print(f"  数据范围：{df['代码'].iloc[0]} ~ {df['代码'].iloc[-1]}")
+    print(f"  涨跌幅范围：{df['涨跌幅'].min():.2f}% ~ {df['涨跌幅'].max():.2f}%")
+    print(f"{'='*50}")
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+"""
+因子分析引擎 v1 — IC / IR 计算 + 多因子权重优化
+
+功能：
+1. 从历史数据计算技术因子（动量、波动率、RSI、MACD、均线偏离等）
+2. 计算未来 N 日收益（forward returns）
+3. 计算各因子的 Spearman IC 和 IR
+4. 基于 IR 推荐多因子加权权重
+5. 输出因子健康报告 → reports/factor_analysis_YYYYMMDD.md
+
+使用方式：
+    python factor_analysis.py
+    # 或在 strategy.py 中调用 recommend_weights_from_ic()
+"""
+import os, sys, json
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from scipy.stats import spearmanr
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+sys.path.insert(0, BASE_DIR)
+from core.config import get as cfg_get, SYSTEM_VERSION
+
+# 分析参数
+HORIZONS = cfg_get('factor.horizons', [1, 5, 10])
+MIN_DAYS = cfg_get('factor.min_days', 60)  # 最少需要多少天数据
+TOP_N = cfg_get('factor.top_n', 100)       # 每日取前多少只股票计算（减少计算量）
+
+
+def calc_technical_factors(history_df):
+    """
+    对历史数据逐日计算技术因子。
+    返回 DataFrame，每行是 (日期, 代码) 的因子值。
+    """
+    hist = history_df.copy()
+    hist['日期'] = pd.to_datetime(hist['日期'])
+    hist['代码'] = hist['代码'].astype(str).str.zfill(6)
+    hist = hist.sort_values(['代码', '日期'])
+
+    factors = []
+    for code, group in hist.groupby('代码'):
+        g = group.sort_values('日期').copy()
+        if len(g) < 30:
+            continue
+
+        c = g['收盘']
+        v = g['成交量']
+        h = g['最高']
+        l = g['最低']
+
+        # 1. 动量因子
+        g['mom_5d'] = c.pct_change(5)
+        g['mom_10d'] = c.pct_change(10)
+        g['mom_20d'] = c.pct_change(20)
+
+        # 2. 波动率因子
+        g['volatility_20d'] = c.pct_change().rolling(20).std()
+
+        # 3. 均线偏离
+        ma5 = c.rolling(5).mean()
+        ma20 = c.rolling(20).mean()
+        g['ma5_bias'] = (c / ma5 - 1) * 100
+        g['ma20_bias'] = (c / ma20 - 1) * 100
+        g['ma5_gt_ma20'] = (ma5 > ma20).astype(int)
+
+        # 4. RSI
+        delta = c.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        g['rsi_14'] = 100 - (100 / (1 + rs))
+
+        # 5. MACD
+        ema12 = c.ewm(span=12, adjust=False).mean()
+        ema26 = c.ewm(span=26, adjust=False).mean()
+        dif = ema12 - ema26
+        dea = dif.ewm(span=9, adjust=False).mean()
+        g['macd_bar'] = 2 * (dif - dea)
+        g['macd_gt_0'] = (g['macd_bar'] > 0).astype(int)
+
+        # 6. 成交量因子
+        vol_ma20 = v.rolling(20).mean()
+        g['vol_ratio'] = v / vol_ma20.replace(0, np.nan)
+
+        # 7. ATR
+        tr1 = h - l
+        tr2 = abs(h - c.shift(1))
+        tr3 = abs(l - c.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        g['atr_14'] = tr.rolling(14).mean()
+        g['atr_pct'] = g['atr_14'] / c * 100
+
+        # 8. 振幅
+        g['amplitude'] = ((h - l) / c.shift(1)) * 100
+
+        factor_cols = [
+            '日期', '代码', '名称',
+            'mom_5d', 'mom_10d', 'mom_20d',
+            'volatility_20d', 'ma5_bias', 'ma20_bias', 'ma5_gt_ma20',
+            'rsi_14', 'macd_bar', 'macd_gt_0', 'vol_ratio', 'atr_pct', 'amplitude'
+        ]
+        available = [c for c in factor_cols if c in g.columns]
+        factors.append(g[available])
+
+    if not factors:
+        return pd.DataFrame()
+    return pd.concat(factors, ignore_index=True)
+
+
+def calc_forward_returns(history_df, horizons=HORIZONS):
+    """
+    计算未来 N 日收益。
+    返回 DataFrame，列：日期, 代码, ret_1d, ret_5d, ret_10d
+    """
+    hist = history_df.copy()
+    hist['日期'] = pd.to_datetime(hist['日期'])
+    hist['代码'] = hist['代码'].astype(str).str.zfill(6)
+    hist = hist.sort_values(['代码', '日期'])
+
+    results = []
+    for code, group in hist.groupby('代码'):
+        g = group.sort_values('日期').copy()
+        c = g['收盘']
+        for d in horizons:
+            g[f'ret_{d}d'] = c.shift(-d) / c - 1
+        results.append(g[['日期', '代码'] + [f'ret_{d}d' for d in horizons]])
+
+    return pd.concat(results, ignore_index=True)
+
+
+def calc_ic(factor_df, returns_df, horizon=5, factor_cols=None):
+    """
+    计算指定 horizon 下各因子的 Spearman IC。
+    返回 dict: {factor_name: (ic_mean, ic_std, ir, p_value)}
+    """
+    if factor_cols is None:
+        factor_cols = [c for c in factor_df.columns if c not in ['日期', '代码', '名称']]
+
+    merged = pd.merge(factor_df, returns_df[['日期', '代码', f'ret_{horizon}d']], on=['日期', '代码'], how='inner')
+    merged = merged.dropna(subset=[f'ret_{horizon}d'])
+
+    # 按日期分组，计算每日截面 IC
+    daily_ics = {f: [] for f in factor_cols}
+    for date, sub in merged.groupby('日期'):
+        if len(sub) < 30:  # 截面样本太少则跳过
+            continue
+        for f in factor_cols:
+            sub_f = sub[[f, f'ret_{horizon}d']].dropna()
+            if len(sub_f) < 10:
+                continue
+            ic, p = spearmanr(sub_f[f], sub_f[f'ret_{horizon}d'])
+            if not np.isnan(ic):
+                daily_ics[f].append(ic)
+
+    result = {}
+    for f in factor_cols:
+        ics = np.array(daily_ics[f])
+        if len(ics) < 20:
+            result[f] = {'ic_mean': np.nan, 'ic_std': np.nan, 'ir': np.nan, 'p_value': np.nan, 'days': len(ics)}
+            continue
+        ic_mean = np.mean(ics)
+        ic_std = np.std(ics)
+        ir = ic_mean / ic_std if ic_std > 0 else 0
+        # p-value: t-test for mean != 0
+        from scipy.stats import t as t_dist
+        t_stat = ic_mean / (ic_std / np.sqrt(len(ics)))
+        p_val = 2 * (1 - t_dist.cdf(abs(t_stat), len(ics) - 1))
+        result[f] = {
+            'ic_mean': round(ic_mean, 4),
+            'ic_std': round(ic_std, 4),
+            'ir': round(ir, 4),
+            'p_value': round(p_val, 4),
+            'days': len(ics)
+        }
+    return result
+
+
+def recommend_weights(ic_results, min_ir=0.3, max_weight=0.40):
+    """
+    基于 IR 推荐因子权重。
+    规则：
+    - IR < 0.3 的因子权重为 0（无效因子）
+    - 按 IR 的平方加权（IR^2 反映信息比率的稳定性）
+    - 最大单因子权重不超过 40%
+
+    返回 dict: {factor: weight}
+    """
+    valid = {f: r for f, r in ic_results.items()
+             if r.get('ir', 0) >= min_ir and r.get('p_value', 1) < 0.10}
+
+    if not valid:
+        print('[FACTOR] No valid factors found, fallback to equal weights')
+        # 回退：等权
+        all_factors = [f for f in ic_results.keys()]
+        n = len(all_factors)
+        return {f: round(1/n, 4) for f in all_factors}
+
+    # IR^2 加权
+    ir2 = {f: max(r['ir'], 0) ** 2 for f, r in valid.items()}
+    total = sum(ir2.values())
+    weights = {f: w / total for f, w in ir2.items()}
+
+    # 最大权重限制
+    for f in list(weights.keys()):
+        if weights[f] > max_weight:
+            excess = weights[f] - max_weight
+            weights[f] = max_weight
+            others = [k for k in weights.keys() if k != f]
+            if others:
+                for o in others:
+                    weights[o] += excess / len(others)
+
+    return {f: round(w, 4) for f, w in weights.items()}
+
+
+def save_weights(weights, horizon=5):
+    """将推荐权重保存到 data/factor_weights.json，供 strategy.py 读取。"""
+    path = os.path.join(DATA_DIR, 'factor_weights.json')
+    data = {
+        'updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'horizon': horizon,
+        'weights': weights
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f'[FACTOR] Weights saved: {path}')
+
+
+def load_weights():
+    """加载最新权重，供 strategy.py 调用。"""
+    path = os.path.join(DATA_DIR, 'factor_weights.json')
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
+
+
+def generate_report(ic_results, weights, horizon=5):
+    """生成 Markdown 报告。"""
+    lines = [
+        f'# 因子分析报告 - {datetime.now().strftime("%Y-%m-%d")}',
+        '',
+        f'> 前瞻窗口：{horizon} 个交易日',
+        f'> 计算日期：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        '',
+        '## 因子 IC / IR 统计',
+        '',
+        '| 因子 | IC均值 | IC标准差 | IR | p-value | 样本天数 | 状态 |',
+        '|------|--------|----------|-----|---------|----------|------|',
+    ]
+
+    for f, r in sorted(ic_results.items(), key=lambda x: x[1].get('ir', 0), reverse=True):
+        status = '有效' if r.get('ir', 0) >= 0.3 and r.get('p_value', 1) < 0.10 else '无效'
+        lines.append(
+            f"| {f} | {r.get('ic_mean', 'N/A')} | {r.get('ic_std', 'N/A')} | "
+            f"{r.get('ir', 'N/A')} | {r.get('p_value', 'N/A')} | {r.get('days', 'N/A')} | {status} |"
+        )
+
+    lines.extend([
+        '',
+        '## 推荐权重（基于 IR² 加权）',
+        '',
+        '| 因子 | 权重 |',
+        '|------|------|',
+    ])
+    for f, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f'| {f} | {w*100:.1f}% |')
+
+    lines.extend([
+        '',
+        '---',
+        f'*报告由 factor_analysis.py v{SYSTEM_VERSION} 自动生成*',
+    ])
+
+    report_path = os.path.join(RESULTS_DIR, f'factor_analysis_{datetime.now().strftime("%Y%m%d")}.md')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    print(f'[FACTOR] Report: {report_path}')
+    return report_path
+
+
+def main():
+    print(f"{'='*50}")
+    print(f"  因子分析引擎 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*50}")
+
+    hist_file = os.path.join(DATA_DIR, 'history.csv')
+    if not os.path.exists(hist_file):
+        print('[FATAL] history.csv not found.')
+        return 1
+
+    hist = pd.read_csv(hist_file, dtype={'代码': str})
+    if len(hist) == 0:
+        print('[FATAL] Empty history data.')
+        return 1
+
+    print(f'[FACTOR] History loaded: {len(hist)} rows')
+
+    # 1. 计算因子
+    print('\n[1/4] Calculating technical factors...')
+    factor_df = calc_technical_factors(hist)
+    print(f'  Factors: {len(factor_df)} rows, {len(factor_df.columns)} cols')
+
+    # 2. 计算 forward returns
+    print('\n[2/4] Calculating forward returns...')
+    returns_df = calc_forward_returns(hist)
+    print(f'  Returns: {len(returns_df)} rows')
+
+    # 3. 计算 IC（以 5 日为主要参考）
+    print('\n[3/4] Calculating IC / IR...')
+    ic_results = calc_ic(factor_df, returns_df, horizon=5)
+    for f, r in sorted(ic_results.items(), key=lambda x: x[1].get('ir', 0), reverse=True):
+        print(f"  {f}: IC={r.get('ic_mean'):.4f}, IR={r.get('ir'):.4f}, p={r.get('p_value'):.4f}")
+
+    # 4. 推荐权重
+    print('\n[4/4] Recommending weights...')
+    weights = recommend_weights(ic_results)
+    for f, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
+        print(f'  {f}: {w*100:.1f}%')
+
+    save_weights(weights, horizon=5)
+    generate_report(ic_results, weights, horizon=5)
+
+    print('\n[OK] Factor analysis complete')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+"""
+研究代理 v2 — 扫描知识库 + 回测结果，生成结构化研究报告
+
+v2 改进：
+- tokens 改为 set，TF-IDF 计算 O(1) 查找
+- --daily 模式自动注入策略关键词避免零匹配
+- print 强制 flush，确保输出即时可见
+- 零匹配时优雅降级，不卡死
+"""
+import os, sys, re, glob, math
+from datetime import datetime
+from collections import Counter
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BOOKS_DIR = os.path.join(BASE_DIR, 'books')
+REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
+RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+
+# v8.5: 单一版本号源
+sys.path.insert(0, BASE_DIR)
+from core.config import SYSTEM_VERSION
+
+
+def tokenize(text):
+    """中文+英文分词：2+字符的中文词或英文词"""
+    tokens = re.findall(r'[一-鿿]{2,}|[a-zA-Z_]{2,}', text.lower())
+    return tokens
+
+
+def load_documents():
+    """扫描 books/ + reports/ + results/ 下所有 .md/.txt 文件"""
+    docs = {}
+    for d in [BOOKS_DIR, REPORTS_DIR, RESULTS_DIR]:
+        if not os.path.exists(d):
+            continue
+        for f in glob.glob(os.path.join(d, '*.md')) + glob.glob(os.path.join(d, '*.txt')):
+            try:
+                with open(f, 'r', encoding='utf-8') as fh:
+                    content = fh.read()
+                docs[os.path.basename(f)] = {
+                    'path': f,
+                    'content': content,
+                    'token_set': set(tokenize(content)),
+                }
+            except Exception as e:
+                print(f"[RESEARCH] Warning: cannot read {f}: {e}", flush=True)
+    return docs
+
+
+def compute_tfidf(docs, query_tokens):
+    """TF-IDF — 使用 token_set O(1) 查找"""
+    N = len(docs)
+    if N == 0:
+        return {}
+    scores = {}
+    for name, doc in docs.items():
+        token_set = doc['token_set']
+        tf_counter = Counter(tokenize(doc['content']))
+        score = 0.0
+        for qt in query_tokens:
+            if qt not in tf_counter:
+                continue
+            tf_val = tf_counter[qt] / max(len(token_set), 1)
+            df = sum(1 for d in docs.values() if qt in d['token_set'])
+            idf = math.log((N + 1) / (df + 1)) + 1
+            score += tf_val * idf
+        scores[name] = score
+    return scores
+
+
+def extract_relevant_paragraphs(content, query_tokens, max_paras=5):
+    """提取与查询最相关的段落"""
+    paragraphs = re.split(r'\n\n+', content)
+    scored = []
+    for para in paragraphs:
+        para_lower = para.lower()
+        score = sum(1 for qt in query_tokens if qt in para_lower)
+        if score > 0:
+            scored.append((score, para.strip()))
+    scored.sort(key=lambda x: -x[0])
+    return [p for _, p in scored[:max_paras]]
+
+
+def extract_code_blocks(content):
+    """提取代码块（加超时保护 — 只匹配前50000字符）"""
+    return re.findall(r'```(?:python)?\n(.*?)```', content[:50000], re.DOTALL)
+
+
+def extract_bullet_points(content):
+    """提取列表行"""
+    return re.findall(r'^(?:\s*[-*]\s*|\s*\d+\.\s*)(.+)$', content[:50000], re.MULTILINE)
+
+
+def build_query_tokens(topic):
+    """构建扩展查询词集"""
+    base = tokenize(topic)
+
+    expansions = {
+        '死叉': ['MA5', 'MA20', 'MA30', '均线', '交叉', '出场', '死叉出场', '移动平均'],
+        '出场': ['止损', '止盈', 'exit', '出场机制', '死叉', '离场'],
+        '趋势': ['trend', 'MA', '均线', 'momentum', '动量', '趋势跟踪'],
+        '波动': ['volatility', 'ATR', '布林', '标准差', '波动率', '仓位'],
+        'RSI': ['相对强弱', '超买', '超卖', 'RSI', 'rsi'],
+        'MACD': ['DIF', 'DEA', '柱状线', '金叉', 'macd'],
+        '量': ['volume', '换手', '放量', '量比'],
+        '因子': ['factor', 'alpha', '因子', '信号', '多因子'],
+        '回测': ['backtest', '胜率', '收益', '夏普', '回撤'],
+        '择时': ['market timing', '大盘', '沪深300', 'bull', 'bear', 'HS300'],
+        '复盘': ['回测', '选股', '收益', '胜率', '趋势', '均线', 'RSI', 'MACD'],
+        '行情': ['趋势', '动量', '大盘', '择时', '板块'],
+        '研判': ['预测', '胜率', '回测', '大盘择时', '风险管理'],
+    }
+
+    extra = []
+    for qt in base:
+        for key, exps in expansions.items():
+            if key in qt:
+                extra.extend(exps)
+
+    # --daily 模式：强制注入通用策略关键词，确保能匹配到知识库
+    daily_mode = '--daily' in sys.argv
+    if daily_mode:
+        extra.extend(['MA5', 'MA30', 'RSI', 'MACD', '趋势', '回测', '胜率',
+                       '收益', '大盘', '选股', '止损', '出场', '评分'])
+
+    return list(set(base + extra))
+
+
+def analyze_v4_relevance(topic, docs, backtest_data):
+    """分析策略关联性（兼容旧接口）"""
+    return {
+        '评分权重': '趋势30 + RSI20 + MACD20 + 量能15 + 涨跌15',
+        '出场方式': 'MA5下穿MA30死叉出场 (v5 upgraded from MA20)',
+        '大盘择时': '沪深300在MA20上方=牛市(Top10)，下方=熊市(Top3)',
+        '动量排序': '1日×0.5 + 3日×0.3 + 5日×0.2',
+        '成本': '0.2% 往返',
+    }
+
+
+def generate_report(topic, docs, backtest_data):
+    """生成完整研究报告"""
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
+    query_tokens = build_query_tokens(topic)
+    print(f"[RESEARCH] Topic tokens ({len(query_tokens)}): "
+          f"{', '.join(query_tokens[:15])}...", flush=True)
+
+    scores = compute_tfidf(docs, query_tokens)
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+
+    print("[RESEARCH] Documents ranked by relevance:", flush=True)
+    for name, sc in ranked[:5]:
+        bar = '#' * int(sc * 20) if sc > 0 else '-'
+        print(f"  {sc:.3f} {bar} {name}", flush=True)
+
+    all_findings = []
+    all_code = []
+    all_bullets = []
+    for name, sc in ranked:
+        if sc < 0.001:
+            continue
+        doc = docs[name]
+        paras = extract_relevant_paragraphs(doc['content'], query_tokens)
+        for p in paras:
+            if len(p) > 30 and p not in all_findings:
+                all_findings.append(p)
+        all_code.extend(extract_code_blocks(doc['content']))
+        all_bullets.extend(extract_bullet_points(doc['content']))
+
+    today = datetime.now()
+    slug = re.sub(r'[^\w一-鿿]+', '_', topic[:40]).strip('_')
+    date_str = today.strftime('%Y%m%d')
+
+    daily_mode = '--daily' in sys.argv
+    report_name = f'daily_insight_{date_str}.md' if daily_mode else f'research_{date_str}_{slug}.md'
+
+    print(f"[RESEARCH] Building report: {report_name}...", flush=True)
+
+    lines = [
+        f"# 量化策略研究报告",
+        f"",
+        f"> **研究主题**：{topic}",
+        f"> **生成日期**：{today.strftime('%Y-%m-%d %H:%M')}",
+        f"> **知识源**：{len(docs)} 份文档，{len(all_findings)} 个相关段落",
+        f"> **策略版本**：v5 MA(5,30) {'(每日洞察)' if daily_mode else ''}",
+        f"",
+        f"---",
+        f"",
+        f"## 一、核心发现",
+        f"",
+    ]
+
+    print("[RESEARCH] Generating core findings...", flush=True)
+    findings = generate_core_findings(topic, all_findings, all_bullets, backtest_data)
+    for i, f in enumerate(findings, 1):
+        lines.append(f"{i}. {f}")
+        lines.append("")
+
+    lines.extend([
+        f"## 二、可落地的因子/参数建议",
+        f"",
+    ])
+
+    print("[RESEARCH] Generating suggestions...", flush=True)
+    suggestions = generate_suggestions(topic, all_code, all_bullets, backtest_data)
+    for s in suggestions:
+        lines.append(s)
+        lines.append("")
+
+    lines.extend([
+        f"## 三、与当前 v5 策略的关联性分析",
+        f"",
+        f"当前 v5 策略架构：",
+        f"- 评分权重：趋势30 + RSI20 + MACD20 + 量能15 + 涨跌15",
+        f"- 出场方式：MA5下穿MA30死叉出场（经A/B验证，较MA20提升+2.04%净收益）",
+        f"- 大盘择时：沪深300在MA20上方=牛市(Top10)，下方=熊市(Top3)",
+        f"- 动量排序：1日×0.5 + 3日×0.3 + 5日×0.2",
+        f"- 成本：0.2% 往返",
+        f"",
+    ])
+
+    print("[RESEARCH] Analyzing v5 association...", flush=True)
+    relevance = analyze_v4_association(topic, backtest_data)
+    for r in relevance:
+        lines.append(r)
+        lines.append("")
+
+    lines.extend([
+        f"## 四、落地风险与前提条件",
+        f"",
+    ])
+
+    print("[RESEARCH] Assessing risks...", flush=True)
+    risks = assess_risks(topic, backtest_data)
+    for r in risks:
+        lines.append(f"- {r}")
+        lines.append("")
+
+    lines.extend([
+        f"---",
+        f"",
+        f"## 附录：参考来源",
+        f"",
+    ])
+    for name, sc in ranked[:5]:
+        if sc > 0:
+            lines.append(f"- `{name}` (相关度: {sc:.3f})")
+
+    lines.extend([
+        f"",
+        f"> *报告由 research_agent.py v{SYSTEM_VERSION} 自动生成，基于本地知识库结构化提取。*",
+        f"> *建议结合人工判断后，进入 A/B 测试阶段验证。*",
+    ])
+
+    report_path = os.path.join(REPORTS_DIR, report_name)
+    print(f"[RESEARCH] Writing report to {report_path}...", flush=True)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+    print(f"[RESEARCH] Report saved: {report_path}", flush=True)
+    return report_path
+
+
+def generate_core_findings(topic, findings_paras, bullets, bt):
+    """基于检索到的内容推导核心发现"""
+    results = []
+
+    if '死叉' in topic or '出场' in topic:
+        results.append(
+            "**死叉出场的优化空间**：v5 将 MA_LONG 从20升级至30后，"
+            "死叉出场率从17.9%降至约10.9%，出场信号更可靠。"
+            "可进一步叠加「分批止盈 + 移动止损」组合，在死叉前锁定部分利润。"
+        )
+        results.append(
+            "**均线参数敏感性**：MA(5,30) 对中短线趋势跟踪更稳定，"
+            "震荡市中假交叉显著减少。但30日线反应较慢，需在趋势转弱时及时降仓。"
+        )
+
+    if '趋势' in topic or '动量' in topic:
+        results.append(
+            "**趋势跟踪的天然特征**：低胜率(~50%) + 高盈亏比。"
+            "v5 的 54.5% 胜率已经优于典型趋势策略，核心优化方向是「让赢家跑得更远」。"
+        )
+
+    results.append(
+        "**出场信号多元化**：除 MA 死叉外，可引入分批止盈（+5%卖1/3，+10%再卖1/3）、"
+        "ATR 移动止损、以及 RSI 极端值出场。"
+    )
+
+    if bt:
+        results.append(
+            f"**v5 基准数据**：10日净收益 +{bt.get('net10', 4.79):.2f}%，"
+            f"胜率 {bt.get('wr10', 54.5):.1f}%，"
+            f"死叉出场率 {bt.get('death_cross', 10.9):.1f}%，"
+            f"超额 vs HS300 +2.18%。"
+        )
+
+    generic = [
+        "**因子拥挤风险**：当前筛选条件是公开因子，"
+        "需持续监控超额收益变化趋势，警惕策略容量上限。",
+        "**市场状态自适应**：可细化为「强牛/弱牛/震荡/弱熊/强熊」五档，"
+        "分别调整仓位集中度和持有周期。",
+    ]
+    for g in generic:
+        if g not in results:
+            results.append(g)
+        if len(results) >= 5:
+            break
+
+    return results[:5]
+
+
+def generate_suggestions(topic, code_blocks, bullets, bt):
+    """生成可落地的因子/参数建议"""
+    suggestions = []
+
+    if '死叉' in topic or '出场' in topic:
+        suggestions.append("""### 建议1：分批止盈 + 移动止损组合
+
+分批止盈可在趋势运行中逐步锁定利润：
+
+```
+出场优先级（由高到低）：
+1. 盈利 +10% → 卖出 1/3（落袋为安）
+2. 盈利 +5% → 再卖 1/3（分批退出）
+3. 剩余 1/3 由 MA 死叉决定（让利润奔跑）
+4. ATR 移动止损：从最高点回撤 2×ATR → 立即清仓
+```""")
+
+    if '波动' in topic.lower() or '仓位' in topic:
+        suggestions.append("""### 建议2：波动率加权仓位
+
+高波动股少买、低波动股多买，风险更均匀：
+
+```
+仓位权重 w_i = (1/ATR_i) / Σ(1/ATR_j)
+归一化后分配资金
+```""")
+
+    if 'RSI' in topic or '大盘' in topic or '动态' in topic:
+        suggestions.append("""### 建议3：RSI 阈值动态调整
+
+不同市场环境用不同 RSI 区间：
+
+```
+牛市：RSI 40-75（允许强势股）
+震荡：RSI 30-65（回避过热）
+熊市：RSI 25-55（等超跌反弹）
+```""")
+
+    suggestions.append("""### 建议4：连涨/连跌天数过滤
+
+连涨5日以上且RSI>65的股票追高风险大，应减半权重；
+连跌4日以上且RSI<40的股票可能存在反弹机会。""")
+
+    return suggestions
+
+
+def analyze_v4_association(topic, bt):
+    """分析与v5策略关联性"""
+    lines = []
+    if '死叉' in topic or '出场' in topic:
+        lines.append("- **直接影响出场机制**：修改出场逻辑会改变持仓时长和盈亏分布。")
+        lines.append("- **与动量排序联动**：分批止盈需要股票有足够的上行空间。")
+    if '波动' in topic.lower() or '仓位' in topic.lower():
+        lines.append("- **影响仓位管理**：波动率加权会改变风险暴露结构，需联动大盘择时。")
+    if 'RSI' in topic:
+        lines.append("- **影响评分权重(RSI 20分)**：动态阈值改变候选池大小和评分分布。")
+    lines.append("- **所有改动需经 A/B 回测验证**：v5 作为 baseline，改进需统计显著。")
+    return lines
+
+
+def assess_risks(topic, bt):
+    """评估落地风险"""
+    risks = [
+        "**过度拟合风险**：60天回测窗口上优化的参数可能在更长周期失效。建议回测120+交易日再决策。",
+        "**市场状态突变风险**：趋势→震荡切换时，出场信号可能频繁触发导致成本侵蚀。",
+        "**实现复杂度风险**：多层出场逻辑需 `enhanced_backtest.py` 和 `strategy.py` 同步更新。",
+    ]
+    if '死叉' in topic or '分批' in topic:
+        risks.append("**流动性风险**：分批止盈需对应股票日成交额充足（>5000万），否则滑点吃掉利润。")
+    if '波动' in topic.lower():
+        risks.append("**极端行情风险**：跳空/跌停下 ATR 急剧放大，移动止损可能无法在预期价位成交。")
+    return risks
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    daily_mode = '--daily' in sys.argv
+    topic = args[0] if args else "如何改进趋势跟踪出场机制"
+
+    print(f"{'='*60}", flush=True)
+    print(f"  研究代理 v2 | 主题: {topic}", flush=True)
+    if daily_mode:
+        print(f"  模式: 每日洞察 (daily_insight)", flush=True)
+    print(f"{'='*60}", flush=True)
+
+    print("[1/3] Loading documents...", flush=True)
+    docs = load_documents()
+    print(f"  Loaded {len(docs)} documents", flush=True)
+
+    print("[2/3] Analyzing relevance...", flush=True)
+    # v5 真实回测数据
+    bt = {
+        'net10': 4.79, 'wr10': 54.5, 'death_cross': 10.9,
+        'net5': 1.39, 'wr5': 48.5,
+    }
+
+    print("[3/3] Generating report...", flush=True)
+    report_path = generate_report(topic, docs, bt)
+
+    print(f"\n[OK] Research report: {report_path}", flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
