@@ -65,6 +65,6 @@ def test_full_pipeline_is_disabled_without_explicit_confirmation():
     full_run = next(
         button
         for button in at.button
-        if button.label == "▶ 执行全流程（选股→回测→洞察→推送）"
+        if button.label == "▶ 执行快速演示（选股→回测→洞察→推送）"
     )
     assert full_run.disabled is True

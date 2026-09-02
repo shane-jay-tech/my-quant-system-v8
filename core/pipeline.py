@@ -73,8 +73,10 @@ PIPELINE_STEPS = {
     "digest":              {"script": "digest.py",                "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "开盘前简报",        "unlock_hint": "始终启用（无 LLM key 走规则兜底）"},
     "decision_replay":     {"script": "decision_replay.py",       "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "决策回放 HTML",     "unlock_hint": "始终启用（纯本地，零成本）"},
     "bark_push":           {"script": "send_to_bark.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "Bark 推送",         "unlock_hint": "始终启用"},
-    "goal_metrics":        {"script": "goal_metrics.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "目标指标",          "unlock_hint": "始终启用（流水线成功率/数据完整率/自检通过率）"},
     "self_check":          {"script": "_self_check.py",           "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "系统自检",          "unlock_hint": "始终启用"},
+    # v8.7 审查修复：goal_metrics 移到 self_check 之后——它读 system_self_check 报告，
+    # 旧顺序会让当日自检结果永远进不了当日目标指标。
+    "goal_metrics":        {"script": "goal_metrics.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "目标指标",          "unlock_hint": "始终启用（流水线成功率/数据完整率/自检通过率）"},
     "auto_heal":           {"script": "auto_heal.py",             "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "自动修复",          "unlock_hint": "始终启用"},
     "walk_forward":        {"script": "walk_forward.py",          "tiers": ["advanced", "pro", "auto"],             "schedule": "wednesday",                      "label": "Walk-Forward 验证", "unlock_hint": "Advanced 级（3万+）/ 周三"},
     "monte_carlo":         {"script": "monte_carlo.py",           "tiers": ["advanced", "pro", "auto"],             "schedule": "month-end",                      "label": "蒙特卡洛模拟",      "unlock_hint": "Advanced 级（3万+）/ 月末"},

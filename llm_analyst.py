@@ -33,6 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 from core.config import get as cfg_get  # noqa: E402
+from utils.file_io import atomic_write_json  # noqa: E402
 
 RESULTS_DIR = os.path.join(BASE_DIR, 'results')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -161,8 +162,7 @@ def write_outputs(date_str: str, model: str, verdicts: list[dict], regime: str) 
         'verdicts': verdicts,
     }
     json_path = os.path.join(RESULTS_DIR, f'llm_analyst_{date_str}.json')
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    atomic_write_json(json_path, payload)
 
     md_path = os.path.join(RESULTS_DIR, f'llm_analyst_{date_str}.md')
     lines = [f"# shadow 多空分析 — {date_str}", '',

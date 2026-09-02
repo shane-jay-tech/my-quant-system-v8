@@ -88,7 +88,7 @@ def load_prev_health():
     # Extract scores
     import re
     scores = {}
-    for m in re.finditer(r'(\w+)\s+█+\s+(\d+)/(\d+)', content):
+    for m in re.finditer(r'\|?\s*(\w+)\s*\|\s*█+\s*(\d+)/(\d+)', content):
         scores[m.group(1)] = {'passed': int(m.group(2)), 'total': int(m.group(3))}
     return {'date': prev_date, 'scores': scores}
 
@@ -119,9 +119,10 @@ v85_new = ['portfolio_manager.py', 'data_validator.py', 'archive_old_data.py',
 v86_new = ['fetch_etf_data.py']
 # v8.7 预备：LLM 融合层（交付层 digest/replay/channels + shadow 分析师 + 统一 LLM 通道）
 v87_new = ['digest.py', 'decision_replay.py', 'llm_analyst.py', 'core/llm.py', 'bark_sender/channels.py']
-config_files = ['daily_pipeline.bat', 'app.py', 'CLAUDE.md',
+config_files = ['daily_pipeline.bat', 'morning_pipeline.bat', 'weekly_health_check.bat',
+                'run.bat', 'start-bg.bat', 'launcher.pyw', 'app.py', 'CLAUDE.md', 'AGENTS.md',
                 'requirements.txt', 'core/config.py', 'real_trades.csv',
-                'weekly_health_check.bat', 'learning/first_week_guide.md']
+                'learning/first_week_guide.md', 'tests/conftest.py']
 
 # v7.6: 拆分后的子包文件
 sub_packages = [
@@ -150,6 +151,10 @@ data_checks = {
     'regime_state.json': 'Regime state',
     'system_config.json': 'System config',
     'etf_watchlist.json': 'ETF watchlist',
+    # v8.7 审查补盲区：之前这些关键状态文件不检查
+    'alpha_gate_state.json': 'Alpha gate state',
+    'strategy_weights.json': 'Strategy weights',
+    'cost_log.jsonl': 'Cost log',
 }
 for fname, desc in data_checks.items():
     path = os.path.join(BASE, 'data', fname)
@@ -221,6 +226,9 @@ modules_import = [
     ('monthly_behavior_report', 'MonthlyBehavior'),
     ('benchmark_comparison', 'Benchmark'), ('tracking_error_report', 'TrackingError'),
     ('smoke_tests', 'SmokeTests'),
+    # v8.7 预备：LLM 融合层（之前只查文件存在，不查能否 import）
+    ('core.llm', 'LLM'), ('digest', 'Digest'), ('decision_replay', 'Replay'),
+    ('llm_analyst', 'LLMAnalyst'), ('bark_sender.channels', 'Channels'),
 ]
 for mod_name, desc in modules_import:
     try:
@@ -324,10 +332,19 @@ if os.path.exists(secrets_path):
     except Exception:
         check('External: Bark token in secrets', 'external', False, 'secrets.json parse error')
 else:
-    # 旧系统兼容：检查源码中是否还有硬编码
-    with open(os.path.join(BASE, 'send_to_bark.py'), 'r', encoding='utf-8') as f:
-        check('External: Bark token', 'external', 'C2910EED8E6540BEBFE994A01A107C58' not in f.read(),
-              'Token still hardcoded in source')
+    # 旧系统兼容：检查推送源码里是否还有 32 位十六进制 token 硬编码。
+    # v8.7 安全修复：不再把真实 token 字面量写进本文件（凭据零硬编码），改用形状检测。
+    hardcoded = False
+    for rel in ('send_to_bark.py', 'bark_sender/push.py', 'bark_sender/config.py', 'bark_sender/channels.py'):
+        try:
+            with open(os.path.join(BASE, rel), 'r', encoding='utf-8') as f:
+                if re.search(r'["\'][0-9A-Fa-f]{32}["\']', f.read()):
+                    hardcoded = True
+                    break
+        except Exception:
+            pass
+    check('External: Bark token', 'external', not hardcoded,
+          '推送源码中仍存在 32 位硬编码 token')
 
 # Scheduled tasks
 import subprocess
@@ -349,6 +366,18 @@ for desc, aliases in TASK_ALIASES.items():
         except Exception:
             continue
     check(f'External: {desc} task', 'external', found)
+
+# v8.7 审查补盲区：morning 任务缺失只 WARN（历史部署都没有），并给出注册命令提示
+_morning_found = False
+try:
+    _r = subprocess.run(['schtasks', '/query', '/tn', 'QuantMorningPipeline', '/fo', 'CSV'],
+                        capture_output=True, text=True, timeout=10)
+    _morning_found = _r.returncode == 0 and 'QuantMorningPipeline' in _r.stdout
+except Exception:
+    pass
+warn('External: morning pipeline task', 'external', _morning_found,
+     'QuantMorningPipeline 未注册（09:15 盘前推送不会自动运行）。注册命令：'
+     'schtasks /create /tn QuantMorningPipeline /tr "<项目路径>\\morning_pipeline.bat" /sc DAILY /st 09:15 /f')
 
 # ── 7. Configuration ──
 print("\n[7] Config")

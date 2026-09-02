@@ -1,26 +1,28 @@
-# 量化交易系统 v7.6 依赖
+# 量化交易系统 v8.6 依赖
 # 安装: pip install -r requirements.txt
+# v8.7 审查修复：补上大版本上界，避免 pandas/numpy/akshare 破坏性升级直接打穿系统
+# （实测通过版本：pandas 3.0.3 / numpy 2.x / streamlit 1.58+）
 
 # 数据处理
-pandas>=2.0.0
-numpy>=1.24.0
+pandas>=2.0.0,<4.0
+numpy>=1.24.0,<3.0
 
 # 数据获取
-requests>=2.31.0
-akshare>=1.12.0
+requests>=2.31.0,<3.0
+# akshare 接口/列名频繁变动，1.16+ 才有 stock_hsgt_hold_stock_em 等接口
+akshare>=1.16.0,<2.0
 
 # 可视化与前端
-# v8.7 审查修复：代码使用 st.dataframe/st.plotly_chart 的 width="stretch" 与 st.toggle，
-# 这些 API 在 1.30 并不存在，下限提到 1.44（实测 1.58/1.59 可用）。
-streamlit>=1.44.0
-plotly>=5.18.0
+# 代码使用 st.dataframe/st.plotly_chart 的 width="stretch" 与 st.toggle，1.30 没有这些 API
+streamlit>=1.44.0,<2.0
+plotly>=5.18.0,<7.0
 
 # 桌面端套壳（PyWebView - launcher.pyw）
 pywebview>=5.0,<7.0
 
 # 系统工具
 python-dateutil>=2.8.0
-scipy>=1.10.0
+scipy>=1.10.0,<2.0
 
 # 开发/验证（README「验证」一节依赖；v8.7 补：此前 .venv 缺 pytest 导致 README 命令跑不起来）
-pytest>=8.0
+pytest>=8.0,<10.0

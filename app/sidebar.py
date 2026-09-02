@@ -89,7 +89,14 @@ def render_sidebar():
                 os.remove(mode_file)
 
         st.divider()
-        st.caption(f"🕐 数据更新：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        # v8.7 产品修复：显示真实数据文件时间，而不是"现在"（数据陈旧时必须暴露）
+        import glob as _glob
+        _stock_files = sorted(_glob.glob(os.path.join(BASE_DIR, 'data', 'stock_*.csv')), reverse=True)
+        if _stock_files:
+            _mtime = datetime.fromtimestamp(os.path.getmtime(_stock_files[0]))
+            st.caption(f"🕐 行情数据日期：{_mtime.strftime('%Y-%m-%d %H:%M')}")
+        else:
+            st.caption("🕐 暂无行情数据")
         st.caption("本地数据 · 自动进化 · 行为追踪")
 
         st.divider()

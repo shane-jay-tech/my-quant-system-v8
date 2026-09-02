@@ -55,17 +55,30 @@ def main():
     parser.add_argument('--no-digest', action='store_true', help='不前置当日开盘前简报')
     args = parser.parse_args()
 
+    # v8.7 修复：.newbie_mode 存在时自动走新手指令卡推送（旧版开关与推送链路脱节）
+    if not (args.simple or args.research or args.newbie or args.file) and os.path.exists(
+            os.path.join(BASE_DIR, '.newbie_mode')):
+        print("[BARK] .newbie_mode detected, auto --newbie")
+        args.newbie = True
+
     if args.newbie:
-        return send_from_newbie_file()
+        loaded = send_from_newbie_file()
+        if not loaded:
+            print("[BARK] No newbie instruction file found (newbie_card step 未运行或 .newbie_mode 不存在于生成时)。")
+            return 1
+        title, body = loaded
+        if not args.dry_run:
+            return 0 if push(title, body) else 1
+        print(f"[DRY-RUN] Title: {title}\nBody: {body[:300]}...")
+        return 0
 
     if args.file:
         with open(args.file, 'r', encoding='utf-8') as f:
             body = f.read()
         title = "量化系统通知"
         if not args.dry_run:
-            push(title, body)
-        else:
-            print(f"[DRY-RUN] Title: {title}\nBody: {body[:200]}...")
+            return 0 if push(title, body) else 1
+        print(f"[DRY-RUN] Title: {title}\nBody: {body[:200]}...")
         return 0
 
     report_path = find_latest_report()
@@ -99,10 +112,9 @@ def main():
             print("[BARK] no digest for today, push standard message only")
 
     if not args.dry_run:
-        push(title, body)
-    else:
-        print(f"[DRY-RUN] Title: {title}\nBody preview:\n{body[:500]}...")
-
+        ok = push(title, body)
+        return 0 if ok else 1
+    print(f"[DRY-RUN] Title: {title}\nBody preview:\n{body[:500]}...")
     return 0
 
 

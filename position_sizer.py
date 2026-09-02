@@ -26,6 +26,7 @@ from utils.calendar import get_last_trading_day  # noqa: E402,F401
 # v7.5: 统一配置中心（保留本地默认值作为 fallback）
 sys.path.insert(0, BASE_DIR)
 from core.config import get as cfg_get, SYSTEM_VERSION
+from utils.file_io import atomic_write_json  # v8.7: 状态文件原子写
 
 # v8.7: REGIME 系数集中在 cost_model.REGIME_ALLOC，position_sizer 直接 import。
 # 大资金（>3000 元）按 5 档 regime 分配；小资金（<=3000 元）在
@@ -193,8 +194,7 @@ def _apply_regime_hysteresis(raw_regime):
 
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(new_state, f, ensure_ascii=False, indent=2)
+        atomic_write_json(state_file, new_state)
     except Exception as e:
         print(f"[SIZER] regime_state save failed: {e}")
 
@@ -713,8 +713,7 @@ def generate_order_file(orders, summary, regime_info):
 
     # 写入JSON
     json_path = os.path.join(ORDERS_DIR, f'daily_orders_{today}.json')
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
+    atomic_write_json(json_path, output)
 
     # 同时生成可读MD摘要
     md_path = os.path.join(ORDERS_DIR, f'daily_orders_{today}.md')

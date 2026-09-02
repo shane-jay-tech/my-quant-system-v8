@@ -11,7 +11,7 @@
     在每日 09:15 后运行，作为 daily_pipeline 的前置步骤
     python premarket_sim.py
 
-输出：reports/premarket_YYYYMMDD.md
+输出：results/premarket_YYYYMMDD.md（v8.7 修正：实际写 results/，非 reports/）
 """
 import os, sys, json
 import pandas as pd

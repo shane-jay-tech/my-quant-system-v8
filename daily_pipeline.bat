@@ -7,10 +7,11 @@ REM  Steps defined in core/pipeline.py PIPELINE_STEPS
 REM  (ASCII-only to avoid codepage mojibake in logs)
 REM ========================================
 set PYTHON=%~dp0.venv\Scripts\python.exe
-set BASE=D:\code\my-quant-system-v8
-if not exist "%BASE%\logs" mkdir "%BASE%\logs"
+REM v8.7 修复：不再写死 D:\code\my-quant-system-v8，换目录/机器可运行
+set BASE=%~dp0
+if not exist "%BASE%logs" mkdir "%BASE%logs"
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set TODAY=%%I
-set LOGFILE=%BASE%\logs\pipeline_%TODAY%.log
+set LOGFILE=%BASE%logs\pipeline_%TODAY%.log
 
 call :main >> "%LOGFILE%" 2>&1
 exit /b %errorlevel%
@@ -24,6 +25,6 @@ echo  %date% %time%
 echo  Tier: QUANT_TIER env or data\system_config.json
 echo ==============================================
 
-cd /d %BASE%
-%PYTHON% -u %BASE%\daily_pipeline.py
+cd /d "%BASE%"
+%PYTHON% -u "%BASE%daily_pipeline.py"
 exit /b %errorlevel%

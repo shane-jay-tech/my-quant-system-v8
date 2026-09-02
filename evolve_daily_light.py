@@ -23,6 +23,7 @@ BACKTEST_FILE = os.path.join(BASE_DIR, 'enhanced_backtest.py')
 # v8: 统一配置中心
 sys.path.insert(0, BASE_DIR)
 from core.config import get as cfg_get, SYSTEM_VERSION
+from utils.file_io import atomic_write_json
 DRY_RUN_ONLY = cfg_get('evolve.dry_run_only', True)
 
 # 允许微调的参数范围
@@ -65,8 +66,7 @@ def save_state(state):
     """保存进化状态"""
     os.makedirs(DATA_DIR, exist_ok=True)
     state['updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with open(STATE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    atomic_write_json(STATE_FILE, state)
 
 
 def get_current_performance():

@@ -173,7 +173,11 @@ def build_channels(cfg: dict | None = None, include_bark: bool = True) -> list[C
 
 
 def push_all(title: str, body: str, channels: list[Channel] | None = None) -> list[str]:
-    """向所有渠道推送，返回逐渠道结果行（'OK xxx' / 'FAIL xxx: 原因'）。"""
+    """向所有渠道推送，返回逐渠道结果行（'OK xxx' / 'FAIL xxx: 异常类型'）。
+
+    v8.7 安全修复：失败原因只保留异常类名——requests 异常原文常含完整 webhook URL，
+    会随 daily_pipeline 日志落盘，等于把推送凭据写进日志。
+    """
     channels = build_channels() if channels is None else channels
     if not channels:
         return ['FAIL 没有任何可用推送渠道（配置 data/secrets.json:bark_tokens 或 notify_channels）']
@@ -184,5 +188,5 @@ def push_all(title: str, body: str, channels: list[Channel] | None = None) -> li
             ch.send(title, body)
             results.append(f"OK {label}")
         except Exception as exc:
-            results.append(f"FAIL {label}: {str(exc)[:160]}")
+            results.append(f"FAIL {label}: {type(exc).__name__}")
     return results

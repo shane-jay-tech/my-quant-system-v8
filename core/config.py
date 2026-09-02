@@ -1,11 +1,11 @@
 """
-统一配置中心 v8.5（分级解锁架构 + 单一版本号源）
+统一配置中心 v8.6（分级解锁架构 + 单一版本号源）
 所有策略参数、风控阈值、合规限制集中管理；新增 Tier 分级解锁配置。
 
 使用方式：
     from core.config import get as cfg, SYSTEM_VERSION
     MA_LONG = cfg('strategy.ma_long', 20)
-    print(f"v{SYSTEM_VERSION}")  # 8.5
+    print(f"v{SYSTEM_VERSION}")  # 8.6
 
     from core.config import SYSTEM_TIER, SystemTier, ENABLE_PORTFOLIO_RISK
     if ENABLE_PORTFOLIO_RISK:
@@ -95,8 +95,10 @@ DEFAULTS = {
         "initial_capital": 2400,
         "manual_capital": None,
         "stop_loss_pct": -0.08,
-        "take_profit_pct": 0.30,
-        "max_hold_days": 30
+        # v8.7 修复：DEFAULTS 与 system_config.json / 文档口径对齐（20% / 10 天），
+        # 旧默认 30% / 30 天会让"配置文件缺失"时风控画像完全不同。
+        "take_profit_pct": 0.20,
+        "max_hold_days": 10
     },
     "broker": {
         "max_single_pct": 1.0,
@@ -200,8 +202,11 @@ def _load_config(force=False):
     else:
         try:
             os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)
-            with open(_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            # v8.7 修复：首次生成配置也走 tmp+replace，断电不留半截 JSON
+            tmp = _CONFIG_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(DEFAULTS, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, _CONFIG_PATH)
             _CACHE_MTIME = os.path.getmtime(_CONFIG_PATH)
         except Exception:
             pass

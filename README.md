@@ -18,7 +18,7 @@
 
 - Python 3.10+
 - pip
-- Windows 定时任务可选：`morning_pipeline.bat`（交易日 09:15）与 `daily_pipeline.bat`（交易日 15:30）
+- Windows 定时任务可选：`morning_pipeline.bat`（交易日 09:15，需手动注册 QuantMorningPipeline 任务）与 `daily_pipeline.bat`（交易日 15:37，任务名 QuantDailyPipeline_v5）
 
 安装依赖：
 

@@ -176,7 +176,8 @@ def _parse_daily_orders_buys():
     buys = []
     in_order_section = False
     for line in content.split('\n'):
-        if line.startswith('## 今日订单'):
+        # v8.7 修复：position_sizer 实际输出 "## 今日买入订单（建议持有...）"，旧代码只认 "## 今日订单"
+        if line.startswith('## 今日订单') or line.startswith('## 今日买入订单'):
             in_order_section = True
             continue
         elif in_order_section and line.startswith('## '):

@@ -230,9 +230,10 @@ def test_build_and_write_report(tmp_path, monkeypatch):
     assert loaded['metrics']['data_completeness']['status'] == 'OK'
 
 
-def test_pipeline_registry_has_goal_metrics_before_self_check():
+def test_pipeline_registry_has_goal_metrics_after_self_check():
+    """v8.7 修复：goal_metrics 读当日自检报告，必须排在 self_check 之后、auto_heal 之前。"""
     from core import pipeline
     keys = list(pipeline.PIPELINE_STEPS.keys())
     assert 'goal_metrics' in keys
-    assert keys.index('goal_metrics') < keys.index('self_check')
+    assert keys.index('self_check') < keys.index('goal_metrics') < keys.index('auto_heal')
     assert pipeline.PIPELINE_STEPS['goal_metrics']['label'] == '目标指标'

@@ -20,6 +20,7 @@ ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
 # v8.5: 单一版本号源
 sys.path.insert(0, BASE_DIR)
 from core.config import SYSTEM_VERSION
+from utils.file_io import atomic_write_json  # v8.7
 
 TOP_N_PER_STRATEGY = 15  # 每个策略的候选数
 FINAL_TOP_N = 20         # 最终输出数
@@ -508,8 +509,7 @@ def update_strategy_weights(strategies, forward_returns_path=None):
             # 保留最近60条
             history['records'] = history['records'][-60:]
 
-            with open(weights_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
+            atomic_write_json(weights_file, history)
         except Exception as e:
             print(f"[VOTER] Weight update skipped: {e}")
     else:

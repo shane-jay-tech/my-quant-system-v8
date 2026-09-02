@@ -109,6 +109,66 @@ def load_evaluation():
         return None
 
 
+def parse_honest_eval_md(text):
+    """解析 honest_evaluation.md 的核心指标/牛熊/超额收益（v8.7 修复：按表头列名解析，
+    不再用易碎正则——旧正则在 '| 持有 | 交易数 | 胜率 | 毛收益 | 净收益 | 死叉出场 |' 格式下全部匹配不到）。
+
+    返回 {'periods': {'1日': {...}}, 'bull': {...}|None, 'bear': {...}|None, 'excess': float|None}
+    """
+    out = {'periods': {}, 'bull': None, 'bear': None, 'excess': None}
+    if not text:
+        return out
+    in_core = False
+
+    def _num(s):
+        try:
+            return float(str(s).replace('%', '').replace('+', '').strip())
+        except (ValueError, AttributeError):
+            return None
+
+    for line in text.splitlines():
+        if line.startswith('## 核心指标'):
+            in_core = True
+            continue
+        if in_core and line.startswith('## '):
+            in_core = False
+            continue
+        if re.match(r'^\|\s*(1日|5日|10日)\s*\|', line):
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if len(parts) >= 6:
+                out['periods'][parts[0]] = {
+                    '交易数': int(_num(parts[1]) or 0),
+                    '胜率': _num(parts[2]),
+                    '毛收益': _num(parts[3]),
+                    '净收益': _num(parts[4]),
+                    '死叉出场': _num(parts[5]),
+                }
+        if re.match(r'^\|\s*牛市\s*\|', line):
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if len(parts) >= 4:
+                out['bull'] = {'笔数': int(_num(parts[1]) or 0), '胜率': _num(parts[2]), '净收益': _num(parts[3])}
+        if re.match(r'^\|\s*熊市', line):
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if len(parts) >= 4:
+                out['bear'] = {'笔数': int(_num(parts[1]) or 0), '胜率': _num(parts[2]), '净收益': _num(parts[3])}
+        m = re.search(r'\*\*超额收益\*\*\s*:\s*([+-]?\d+\.?\d*)%', line)
+        if m:
+            out['excess'] = float(m.group(1))
+    return out
+
+
+def load_latest_digest():
+    """读取最新开盘前简报（digest.py 生成），无则返回 None。"""
+    files = sorted(glob.glob(os.path.join(RESULTS_DIR, 'digest_*.md')), reverse=True)
+    if not files:
+        return None
+    try:
+        with open(files[0], 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=60)
 def load_daily_insight():
     files = sorted(glob.glob(os.path.join(REPORTS_DIR, 'daily_insight_*.md')), reverse=True)

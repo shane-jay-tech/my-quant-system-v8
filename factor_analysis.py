@@ -25,6 +25,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 sys.path.insert(0, BASE_DIR)
 from core.config import get as cfg_get, SYSTEM_VERSION
+from utils.file_io import atomic_write_json  # v8.7
 
 # 分析参数
 HORIZONS = cfg_get('factor.horizons', [1, 5, 10])
@@ -228,8 +229,7 @@ def save_weights(weights, horizon=5):
         'horizon': horizon,
         'weights': weights
     }
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, data)
     print(f'[FACTOR] Weights saved: {path}')
 
 

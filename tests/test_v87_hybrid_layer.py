@@ -264,7 +264,7 @@ def test_push_all_isolates_failures():
     chans = [_Boom({}), _Ok({})]
     chans[0].alias, chans[1].alias = '坏的', '好的'
     res = ch.push_all('t', 'b', channels=chans)
-    assert res[0].startswith('FAIL 坏的: down') and res[1] == 'OK 好的'
+    assert res[0] == 'FAIL 坏的: RuntimeError' and res[1] == 'OK 好的'
     assert _Ok.sent == [('t', 'b')]
 
 
@@ -330,9 +330,13 @@ def test_send_bark_without_tokens_returns_false(capsys):
 
 
 def test_no_hardcoded_bark_token_in_sources():
-    for rel in ('bark_sender/config.py', 'bark_sender/push.py', 'bark_sender/channels.py', 'send_to_bark.py'):
+    """凭据零硬编码：扫描全部推送/自检源码，禁止任何 32 位十六进制 token 字面量。"""
+    import re
+    pat = re.compile(r'["\'][0-9A-Fa-f]{32}["\']')
+    for rel in ('bark_sender/config.py', 'bark_sender/push.py', 'bark_sender/channels.py',
+                'send_to_bark.py', '_self_check.py'):
         src = (BASE_DIR / rel).read_text(encoding='utf-8')
-        assert 'C2910EED' not in src, f'{rel} 仍有硬编码 token'
+        assert not pat.search(src), f'{rel} 仍含 32 位硬编码 token 字面量'
 
 
 # ------------------------------------------------------------
@@ -404,7 +408,7 @@ def test_pipeline_hybrid_layer_order():
     k = list(PIPELINE_STEPS)
     assert k.index('strategy_feedback') < k.index('llm_analyst') < k.index('digest') < k.index('decision_replay') < k.index('bark_push')
     assert k.index('exit_advisor') < k.index('position_sizing')
-    assert k.index('goal_metrics') < k.index('self_check')
+    assert k.index('self_check') < k.index('goal_metrics') < k.index('auto_heal')  # v8.7：goal_metrics 读当日自检
     for name in ('llm_analyst', 'digest', 'decision_replay'):
         assert k.count(name) == 1
         assert os.path.exists(BASE_DIR / PIPELINE_STEPS[name]['script'])

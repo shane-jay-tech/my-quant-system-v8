@@ -37,8 +37,16 @@ def log(level, msg):
     print(f"  [{level}] {msg}")
 
 def recreate_default_json(path, defaults):
-    """创建默认 JSON 配置文件（v8.7：原子写）"""
+    """创建默认 JSON 配置文件（v8.7：原子写 + 覆盖前自动备份）"""
+    import shutil
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        bak = f'{path}.bak_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        try:
+            shutil.copy2(path, bak)
+            log('INFO', f'Backed up before recreate: {os.path.basename(bak)}')
+        except OSError:
+            pass
     atomic_write_json(path, defaults)
     return os.path.exists(path)
 
@@ -121,11 +129,12 @@ def fix_scheduled_task(task_name, bat_path, desc):
         return False
 
     if 'Daily' in task_name:
-        cmd = f'schtasks /create /tn {task_name} /tr "{bat_path}" /sc DAILY /st 15:37 /f'
+        cmd = ['schtasks', '/create', '/tn', task_name, '/tr', bat_path, '/sc', 'DAILY', '/st', '15:37', '/f']
     else:
-        cmd = f'schtasks /create /tn {task_name} /tr "{bat_path}" /sc WEEKLY /d SUN /st 10:00 /f'
+        cmd = ['schtasks', '/create', '/tn', task_name, '/tr', bat_path, '/sc', 'WEEKLY', '/d', 'SUN', '/st', '10:00', '/f']
 
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+    # v8.7 安全修复：shell=False + 参数列表，避免命令注入面
+    r = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=15)
     success = r.returncode == 0
     if not success:
         log('WARN', f'schtasks create failed: {r.stderr[:200]}')

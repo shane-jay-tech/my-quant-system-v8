@@ -19,12 +19,19 @@ REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
 from .loaders import (
 load_latest_picks, load_index_data, load_evaluation,
 load_daily_insight, run_pipeline_step, load_all_system_picks, load_current_prices,
-parse_pick_line
+parse_pick_line, parse_honest_eval_md, load_latest_digest
 )
 
 def render_picks_page():
     st.title("🎯 今日选股")
     st.caption("先确认数据是否新鲜，再看首选与风险；具体买卖数量请以“模拟交易”页的订单为准。")
+
+    # v8.7 产品修复：开盘前简报置顶——先看四段结论，再往下翻明细
+    digest_md = load_latest_digest()
+    if digest_md:
+        body = digest_md.split('---')[0] if '---' in digest_md else digest_md
+        with st.container(border=True):
+            st.markdown(body[:1200])
 
     stocks_df, pick_date, pick_file = load_latest_picks()
 
@@ -112,36 +119,40 @@ def render_backtest_page():
     if eval_content is None:
         st.warning("暂无回测数据。请先运行回测。")
     else:
-        # 提取关键指标
-        net10_match = re.search(r'持有10日.*?净收益.*?([+-]?\d+\.?\d*)%', eval_content)
-        wr10_match = re.search(r'持有10日.*?胜率.*?(\d+\.?\d*)%', eval_content)
-        excess_match = re.search(r'超额收益.*?([+-]?\d+\.?\d*)%', eval_content)
-        dc_match = re.search(r'死叉出场.*?(\d+\.?\d*)%', eval_content)
+        # v8.7 修复：按表头列名解析（旧正则与当前报告格式不匹配，KPI 全显示 0）
+        ev = parse_honest_eval_md(eval_content)
+        p10 = ev['periods'].get('10日', {})
+        net10 = p10.get('净收益')
+        wr10 = p10.get('胜率')
+        excess = ev.get('excess')
+        dc_rate = p10.get('死叉出场')
 
-        net10 = float(net10_match.group(1)) if net10_match else 0
-        wr10 = float(wr10_match.group(1)) if wr10_match else 0
-        excess = float(excess_match.group(1)) if excess_match else 0
-        dc_rate = float(dc_match.group(1)) if dc_match else 0
+        def _fmt(v, suffix='%', sign=True):
+            if v is None:
+                return 'N/A'
+            return f'{v:+0.2f}{suffix}' if sign else f'{v:0.1f}{suffix}'
 
         # KPI 卡片
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            net_color = "red" if net10 > 0 else ("green" if net10 < 0 else "blue")
+            net_color = "red" if (net10 or 0) > 0 else ("green" if (net10 or 0) < 0 else "blue")
             st.markdown(
-                f'<div class="metric-card {net_color}"><div class="label">10日净收益</div><div class="big-number">{net10:+.2f}%</div></div>',
+                f'<div class="metric-card {net_color}"><div class="label">10日净收益</div><div class="big-number">{_fmt(net10)}</div></div>',
                 unsafe_allow_html=True)
         with col2:
             st.markdown(
-                f'<div class="metric-card blue"><div class="label">10日胜率</div><div class="big-number">{wr10:.1f}%</div></div>',
+                f'<div class="metric-card blue"><div class="label">10日胜率</div>'
+                f'<div class="big-number">{_fmt(wr10, sign=False) if wr10 is not None else "N/A"}</div></div>',
                 unsafe_allow_html=True)
         with col3:
-            color = "red" if excess > 0 else "green"  # A股惯例：红涨绿跌
+            color = "red" if (excess or 0) > 0 else "green"  # A股惯例：红涨绿跌
             st.markdown(
-                f'<div class="metric-card {color}"><div class="label">超额收益(vs沪深300)</div><div class="big-number">{excess:+.2f}%</div></div>',
+                f'<div class="metric-card {color}"><div class="label">超额收益(vs沪深300)</div><div class="big-number">{_fmt(excess)}</div></div>',
                 unsafe_allow_html=True)
         with col4:
             st.markdown(
-                f'<div class="metric-card warning"><div class="label">死叉出场率</div><div class="big-number">{dc_rate:.1f}%</div></div>',
+                f'<div class="metric-card warning"><div class="label">死叉出场率</div>'
+                f'<div class="big-number">{_fmt(dc_rate, sign=False) if dc_rate is not None else "N/A"}</div></div>',
                 unsafe_allow_html=True)
 
         # 提取持有期详细数据
@@ -150,15 +161,13 @@ def render_backtest_page():
 
         periods = []
         for hold in ['1日', '5日', '10日']:
-            net_match = re.search(f'持有{hold}.*?净收益.*?([+-]?\\d+\\.?\\d*)%', eval_content)
-            wr_match = re.search(f'持有{hold}.*?胜率.*?(\\d+\\.?\\d*)%', eval_content)
-            gross_match = re.search(f'持有{hold}.*?毛收益.*?([+-]?\\d+\\.?\\d*)%', eval_content)
-            if net_match:
+            row = ev['periods'].get(hold)
+            if row and row.get('净收益') is not None:
                 periods.append({
                     '持有期': hold,
-                    '净收益(%)': float(net_match.group(1)),
-                    '胜率(%)': float(wr_match.group(1)) if wr_match else 0,
-                    '毛收益(%)': float(gross_match.group(1)) if gross_match else 0,
+                    '净收益(%)': row['净收益'],
+                    '胜率(%)': row.get('胜率') or 0,
+                    '毛收益(%)': row.get('毛收益') or 0,
                 })
         if periods:
             import plotly.graph_objects as go
@@ -182,24 +191,22 @@ def render_backtest_page():
         # 牛熊对比
         st.divider()
         st.subheader("🐂🐻 牛熊市表现对比")
-        bull_match = re.search(r'牛市.*?胜率.*?(\d+\.?\d*)%.*?净收益.*?([+-]?\d+\.?\d*)%', eval_content)
-        bear_match = re.search(r'熊市.*?胜率.*?(\d+\.?\d*)%.*?净收益.*?([+-]?\d+\.?\d*)%', eval_content)
+        bull, bear = ev.get('bull'), ev.get('bear')
 
-        if bull_match and bear_match:
-            bull_wr, bull_net = float(bull_match.group(1)), float(bull_match.group(2))
-            bear_wr, bear_net = float(bear_match.group(1)), float(bear_match.group(2))
-
+        if bull and bear:
             col_bull, col_bear = st.columns(2)
             with col_bull:
                 st.markdown(
                     f'<div class="metric-card red"><div class="label">🐂 牛市 (10日持有)</div>'
-                    f'<div>胜率: {bull_wr:.1f}% | 净收益: {bull_net:+.2f}%</div></div>',
+                    f'<div>胜率: {bull["胜率"]:.1f}% | 净收益: {bull["净收益"]:+.2f}%</div></div>',
                     unsafe_allow_html=True)
             with col_bear:
                 st.markdown(
                     f'<div class="metric-card green"><div class="label">🐻 熊市/震荡 (10日持有)</div>'
-                    f'<div>胜率: {bear_wr:.1f}% | 净收益: {bear_net:+.2f}%</div></div>',
+                    f'<div>胜率: {bear["胜率"]:.1f}% | 净收益: {bear["净收益"]:+.2f}%</div></div>',
                     unsafe_allow_html=True)
+        else:
+            st.caption("报告里没有牛熊分段数据。")
 
         # 显示原始报告
         with st.expander("📄 完整回测报告"):
@@ -321,18 +328,18 @@ def render_pipeline_control_page():
 
     st.divider()
 
-    # 一键全流程
-    st.subheader("🚀 一键全流程")
-    st.caption("全程约 3-10 分钟（含联网抓取与研究生成），执行期间请勿关闭页面；也可以只点下方单个步骤。")
-    confirm_full_pipeline = st.checkbox(
-        "我已确认：这会联网更新数据、运行分析，并在成功后发送 Bark 推送",
-        key="confirm_full_pipeline",
+    # 快速演示（v8.7 改名：这四步不是完整 DAG，完整日终流水线请用 daily_pipeline.bat）
+    st.subheader("🚀 快速演示（选股→回测→洞察→推送）")
+    st.caption("仅演示核心四步，约 3-10 分钟。**完整流水线**（抓数据/校验/仓位/模拟/风控/自检等）请运行 daily_pipeline.bat 或等待每日 15:37 自动任务。")
+    confirm_quick_demo = st.checkbox(
+        "我已确认：这会联网更新数据、运行分析，并在成功后发送推送",
+        key="confirm_quick_demo",
     )
     if st.button(
-        "▶ 执行全流程（选股→回测→洞察→推送）",
+        "▶ 执行快速演示（选股→回测→洞察→推送）",
         type="primary",
         width="stretch",
-        disabled=not confirm_full_pipeline,
+        disabled=not confirm_quick_demo,
     ):
         steps = [
             (['strategy.py'], '选股策略'),
@@ -358,7 +365,7 @@ def render_pipeline_control_page():
                 st.error(f"```\n{output[:300]}\n```")
 
         if all(s for _, s, _ in results_log):
-            st.success("🎉 全流程执行成功！Bark 推送已发送。")
+            st.success("🎉 快速演示四步执行成功！推送已发送。完整日终流水线请用 daily_pipeline.bat。")
             st.cache_data.clear()
         else:
             st.warning("⚠️ 部分步骤失败，请检查上方日志。")
@@ -479,8 +486,8 @@ def _render_replay_block():
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        delta_color = "inverse" if cur_ret_pct >= 0 else "normal"  # A股惯例：红涨绿跌
-        st.metric("当前净值", f"{cur_equity:,.2f}元", delta=f"{cur_ret_pct:+.2f}%")
+        # v8.7 修复：A股红涨绿跌统一用 inverse（旧代码算完 delta_color 却没传给 st.metric）
+        st.metric("当前净值", f"{cur_equity:,.2f}元", delta=f"{cur_ret_pct:+.2f}%", delta_color="inverse")
     with col2:
         st.metric("最大回撤", f"{max_dd:+.2f}%")
     with col3:
@@ -537,6 +544,14 @@ def _render_today_orders_block():
     if not order_files:
         st.info("暂无订单。运行 position_sizer.py 生成今日订单。")
         return
+    # v8.7 产品修复：订单文件日期 != 今天时明确提示，防止把历史订单当今日动作执行
+    m = re.search(r'daily_orders_(\d{8})\.md', os.path.basename(order_files[0]))
+    order_date = m.group(1) if m else ''
+    today_str = datetime.now().strftime('%Y%m%d')
+    if order_date and order_date != today_str:
+        od = f"{order_date[:4]}/{order_date[4:6]}/{order_date[6:]}"
+        st.warning(f"⚠️ 这是 **{od}** 生成的订单，不是今天的——"
+                   f"请先运行/等待今日流水线更新数据，不要按旧订单操作。")
     try:
         with open(order_files[0], 'r', encoding='utf-8') as f:
             st.markdown(f.read())
@@ -558,9 +573,21 @@ def _reset_sim_account(state_path, capital):
     同时清空权益曲线和交易历史 —— 旧基线下的曲线/成交记录和新本金混在一起会误导
     （否则会出现 total_trades=0 却仍列出旧成交的矛盾展示）。文件由 sim 引擎下次运行重建。
     旁路文件从 state_path 所在目录推导（生产即 sim_results/），保证三者同目录、可隔离测试。
+    v8.7 产品修复：删除前先把三个文件备份到 backup_YYYYMMDD_HHMMSS/，误点可恢复。
     """
+    import shutil
     from utils.file_io import atomic_write_json
     now = datetime.now()
+    sim_dir = os.path.dirname(state_path)
+    backup_dir = os.path.join(sim_dir, f'backup_{now.strftime("%Y%m%d_%H%M%S")}')
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        for fname in ('account_state.json', 'equity_curve.csv', 'trade_history.csv'):
+            src = os.path.join(sim_dir, fname)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(backup_dir, fname))
+    except OSError:
+        pass  # 备份失败不阻断重置（但打印提示）
     state = {
         'cash': capital, 'total_invested': 0.0, 'equity': capital,
         'initial_capital': capital, 'positions': [],
@@ -571,7 +598,6 @@ def _reset_sim_account(state_path, capital):
         '_reset_reason': 'manual_capital_set',
     }
     atomic_write_json(state_path, state)
-    sim_dir = os.path.dirname(state_path)
     for fname in ('equity_curve.csv', 'trade_history.csv'):
         p = os.path.join(sim_dir, fname)
         try:
@@ -579,6 +605,7 @@ def _reset_sim_account(state_path, capital):
                 os.remove(p)
         except OSError:
             pass
+    return backup_dir
 
 
 def _render_capital_setting():
@@ -604,20 +631,25 @@ def _render_capital_setting():
         new_cap = st.number_input("我的真实总资金（元）", min_value=0.0,
                                   value=float(baseline), step=100.0, format="%.2f",
                                   help="填你实际放在股市里的总钱数；填了就以这个为准，重置模拟账户重新起算。")
+        # v8.7 产品修复：重置会清空模拟历史，必须显式确认；重置前会自动备份
+        confirm_reset = st.checkbox(
+            "我确认重置模拟账户（系统会自动备份当前账户/曲线/历史到 backup_* 目录）",
+            key="confirm_sim_reset",
+        )
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("💾 保存并重置模拟账户", width="stretch"):
+            if st.button("💾 保存并重置模拟账户", width="stretch", disabled=not confirm_reset):
                 if new_cap <= 0:
                     st.error("金额要大于 0")
                 else:
                     val = round(float(new_cap), 2)
                     _cfg_set('sim.manual_capital', val)
-                    _reset_sim_account(state_path, val)
-                    st.success(f"已把模拟本金设为 {val:,.0f} 元，账户按新本金重新起算。")
+                    backup_dir = _reset_sim_account(state_path, val)
+                    st.success(f"已把模拟本金设为 {val:,.0f} 元，账户按新本金重新起算。备份在 {os.path.basename(backup_dir)}。")
                     st.rerun()
         with c2:
             if manual is not None:
-                if st.button("↩️ 取消手动，改回自动推算", width="stretch"):
+                if st.button("↩️ 取消手动，改回自动推算", width="stretch", disabled=not confirm_reset):
                     # 当场显式重置到自动推算值，避免遗留旧基线导致下次加载静默调整现金
                     _cfg_set('sim.manual_capital', None)
                     try:
@@ -625,8 +657,8 @@ def _render_capital_setting():
                         auto_cap = float(_sim.resolve_initial_capital())
                     except Exception:
                         auto_cap = float(_cfg_get('sim.initial_capital', 2400))
-                    _reset_sim_account(state_path, auto_cap)
-                    st.success(f"已改回自动推算（约 {auto_cap:,.0f} 元），账户已按此重新起算。")
+                    backup_dir = _reset_sim_account(state_path, auto_cap)
+                    st.success(f"已改回自动推算（约 {auto_cap:,.0f} 元），账户已按此重新起算。备份在 {os.path.basename(backup_dir)}。")
                     st.rerun()
 
 

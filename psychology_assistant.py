@@ -18,7 +18,7 @@ STATE_FILE = os.path.join(SIM_DIR, 'account_state.json')
 
 # v8.5: 单一版本号源
 sys.path.insert(0, BASE_DIR)
-from core.config import SYSTEM_VERSION
+from core.config import SYSTEM_VERSION, get as cfg_get
 
 # ── 心理学素材库 ──
 
@@ -162,8 +162,9 @@ def daily_psychology_check(state):
     if state is None:
         return "今天还没有开始交易。心态平和是交易的第一课。耐心等待系统信号。"
 
-    equity = state.get('equity', 100000)
-    cash = state.get('cash', 100000)
+    # v8.7 修复：不再用写死的 10 万分母/1 万元现金阈值——小资金（2400 元）下这两个数字完全失真
+    equity = float(state.get('equity') or cfg_get('sim.initial_capital', 2400))
+    cash = float(state.get('cash') or 0)
     positions = state.get('positions', [])
     total_pnl = state.get('total_pnl', 0)
     winning = state.get('winning_trades', 0)
@@ -174,7 +175,7 @@ def daily_psychology_check(state):
     for p in positions:
         floating_pnl += p.get('unrealized_pnl', 0)
 
-    daily_change_pct = floating_pnl / 100000 * 100
+    daily_change_pct = floating_pnl / max(equity, 1) * 100
 
     messages = []
 
@@ -200,9 +201,10 @@ def daily_psychology_check(state):
     else:
         messages.append("今天市场平淡。平淡的日子最考验耐心——坚持执行系统，不要手痒。")
 
-    # 仓位过重提醒
-    if cash < 10000 and len(positions) > 0:
-        messages.append("\n提醒：现金已不足1万元，仓位较重。如果市场回调，你可能没有弹药补仓。\n\n但记住：不要因为担心而提前卖出——按系统信号来。")
+    # 仓位过重提醒（按现金占权益比例，适配小资金）
+    if equity > 0 and (cash / equity) < 0.3 and len(positions) > 0:
+        cash_pct = cash / equity * 100
+        messages.append(f"\n提醒：现金只剩权益的 {cash_pct:.0f}%，仓位较重。如果市场回调，你可能没有弹药补仓。\n\n但记住：不要因为担心而提前卖出——按系统信号来。")
 
     return '\n\n'.join(messages)
 
@@ -275,7 +277,7 @@ def generate_psychology_diary(state):
 
     # 账户快照
     if state:
-        equity = state.get('equity', 100000)
+        equity = state.get('equity', cfg_get('sim.initial_capital', 2400))
         pnl = state.get('total_pnl', 0)
         total = state.get('total_trades', 0)
         winning = state.get('winning_trades', 0)

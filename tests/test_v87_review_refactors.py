@@ -27,6 +27,7 @@ import smoke_tests  # noqa: E402
 import portfolio_manager  # noqa: E402
 import track_performance  # noqa: E402
 import data_loader  # noqa: E402
+import send_to_bark  # noqa: E402
 import bark_sender.parsers as parsers  # noqa: E402
 
 
@@ -141,3 +142,86 @@ def test_tests_cannot_reset_production_sim_account():
     prod_state = BASE_DIR / 'sim_results' / 'account_state.json'
     with pytest.raises(AssertionError):
         pages._reset_sim_account(str(prod_state), 2400.0)
+
+
+# ------------------------------------------------------------
+# 2026-09-02 四维全面审查修复回归
+# ------------------------------------------------------------
+def test_parse_honest_eval_md_real_table():
+    md = """# 策略诚实评估 v4
+## 核心指标
+| 持有 | 交易数 | 胜率 | 毛收益 | 净收益 | 死叉出场 |
+|------|--------|------|--------|--------|----------|
+| 1日 | 446 | 46.0% | +0.19% | +0.08% | 0.0% |
+| 5日 | 446 | 50.7% | +0.66% | +0.55% | 4.9% |
+| 10日 | 436 | 48.9% | +1.27% | +1.16% | 20.9% |
+
+## 大盘择时效果（10日持有）
+| 市场状态 | 笔数 | 胜率 | 净收益 |
+| 牛市 | 370 | 49.5% | +1.34% |
+| 熊市/震荡 | 66 | 45.5% | +0.13% |
+
+## 基准对比
+- **超额收益**: -0.09%
+"""
+    ev = loaders.parse_honest_eval_md(md)
+    assert ev['periods']['10日']['净收益'] == 1.16
+    assert ev['periods']['10日']['胜率'] == 48.9
+    assert ev['periods']['10日']['死叉出场'] == 20.9
+    assert ev['bull']['净收益'] == 1.34
+    assert ev['bear']['笔数'] == 66
+    assert ev['excess'] == -0.09
+
+
+def test_bats_no_hardcoded_paths_and_morning_really_runs():
+    morning = (BASE_DIR / 'morning_pipeline.bat').read_text(encoding='utf-8')
+    daily = (BASE_DIR / 'daily_pipeline.bat').read_text(encoding='utf-8')
+    weekly = (BASE_DIR / 'weekly_health_check.bat').read_text(encoding='utf-8')
+    start = (BASE_DIR / 'start-bg.bat').read_text(encoding='utf-8')
+    def _active(txt):
+        return [l for l in txt.splitlines() if l.strip() and not l.strip().upper().startswith('REM')]
+
+    assert all('D:\\code\\my-quant-system-v8' not in l for l in _active(daily) + _active(weekly) + _active(start))
+    assert 'premarket_sim.py' in morning
+    active_lines = [l for l in morning.splitlines() if l.strip() and not l.strip().startswith('REM')]
+    assert not any('--dry-run' in l for l in active_lines)  # 晨间不再空转
+    assert 'send_to_bark.py --file' in morning and '>>' in morning
+    assert '%~dp0' in daily and '%~dp0' in weekly
+
+
+def test_reset_sim_account_backs_up_before_delete(tmp_path):
+    import app.pages as pages
+    state_path = str(tmp_path / 'account_state.json')
+    eq = tmp_path / 'equity_curve.csv'
+    th = tmp_path / 'trade_history.csv'
+    with open(state_path, 'w', encoding='utf-8') as f:
+        f.write('{"initial_capital":2400}')
+    eq.write_text('日期,总权益\n2026-01-01,2400\n', encoding='utf-8')
+    th.write_text('日期,代码\n2026-01-01,000001\n', encoding='utf-8')
+    pages._reset_sim_account(state_path, 2500.0)
+    backups = list(tmp_path.glob('backup_*'))
+    assert len(backups) == 1
+    assert (backups[0] / 'account_state.json').exists()
+    assert (backups[0] / 'equity_curve.csv').exists()
+    assert (backups[0] / 'trade_history.csv').exists()
+    assert not eq.exists() and not th.exists()  # 原文件按契约清空，但已有备份
+
+
+def test_psychology_uses_equity_denominator(tmp_path, monkeypatch):
+    import psychology_assistant as psy
+    monkeypatch.setattr(psy, 'STATE_FILE', str(tmp_path / 'none.json'))
+    state = {'equity': 2400.0, 'cash': 100.0, 'positions': [{'unrealized_pnl': -100}],
+             'total_pnl': -100, 'total_trades': 0, 'winning_trades': 0}
+    text = psy.daily_psychology_check(state)
+    assert '现金只剩权益的 4%' in text  # 旧版按 <1 万元提示；现在按 100/2400=4%
+    assert '100000' not in text
+
+
+def test_send_to_bark_exit_code_follows_push_result(tmp_path, monkeypatch):
+    f = tmp_path / 'msg.txt'
+    f.write_text('test message', encoding='utf-8')
+    monkeypatch.setattr(send_to_bark, 'push', lambda title, body: False)
+    monkeypatch.setattr(sys, 'argv', ['send_to_bark.py', '--file', str(f), '--no-digest'])
+    assert send_to_bark.main() == 1
+    monkeypatch.setattr(send_to_bark, 'push', lambda title, body: True)
+    assert send_to_bark.main() == 0

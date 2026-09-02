@@ -24,6 +24,7 @@ SIM_DIR = os.path.join(BASE_DIR, 'sim_results')
 # v8.5: 单一版本号源
 sys.path.insert(0, BASE_DIR)
 from core.config import SYSTEM_VERSION, get as cfg_get
+from utils.file_io import atomic_write_json  # v8.7
 
 # 保留模块级常量以兼容旧测试/旧 import，但默认值跟随 core.config sim.*。
 STOP_LOSS_PCT = cfg_get('sim.stop_loss_pct', -0.08)
@@ -492,8 +493,7 @@ def main():
 
     # 6. 保存JSON供Bark使用
     json_path = os.path.join(RESULTS_DIR, f'exit_advisor_{datetime.now().strftime("%Y%m%d")}.json')
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(analyses, f, ensure_ascii=False, indent=2, default=str)
+    atomic_write_json(json_path, analyses)
 
     return 0
 
