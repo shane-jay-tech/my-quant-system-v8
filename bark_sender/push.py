@@ -1,15 +1,24 @@
 import requests, os, glob
+from datetime import datetime
 from .config import BARK_TOKENS
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(BASE_DIR, 'results')
 ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
 
-def send_bark(title, body):
-    """Send Bark push to all registered devices"""
+def send_bark(title, body, tokens=None):
+    """Send Bark push to all registered devices.
+
+    tokens: 可选，默认用 secrets.json 里的 BARK_TOKENS。
+    v8.7: 无 token 时明确返回 False（旧版会静默返回 True）。
+    """
+    tokens = list(tokens) if tokens is not None else list(BARK_TOKENS)
+    if not tokens:
+        print("[BARK] 没有配置 token（data/secrets.json:bark_tokens），跳过推送")
+        return False
     api_url = "http://www.ggsuper.com.cn/push/api/v1/sendMsg3_New.php"
     all_ok = True
-    for i, token in enumerate(BARK_TOKENS):
+    for i, token in enumerate(tokens):
         payload = {
             'token': token,
             'title': title,

@@ -192,8 +192,11 @@ def _load_config(force=False):
                 user_cfg = json.load(f)
             cfg = _deep_merge(cfg, user_cfg)
             _CACHE_MTIME = os.path.getmtime(_CONFIG_PATH)
-        except Exception:
-            pass
+        except Exception as exc:
+            # v8.7 审查修复：不再静默吞掉配置错误——至少打印明确告警，
+            # 否则风控/仓位配置损坏会被 DEFAULTS 悄悄顶替且无人知晓。
+            print(f"[CONFIG] WARNING: {_CONFIG_PATH} 解析失败，本次使用 DEFAULTS 兜底: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
     else:
         try:
             os.makedirs(os.path.dirname(_CONFIG_PATH), exist_ok=True)

@@ -11,6 +11,7 @@ sys.path.insert(0, BASE)
 
 # v8.5: 单一版本号源
 from core.config import SYSTEM_VERSION, get as cfg_get
+from utils.file_io import atomic_write_json
 
 HEAL_LOG = []
 FIX_COUNT = {'attempted': 0, 'fixed': 0, 'failed': 0, 'skipped': 0}
@@ -36,10 +37,9 @@ def log(level, msg):
     print(f"  [{level}] {msg}")
 
 def recreate_default_json(path, defaults):
-    """创建默认 JSON 配置文件"""
+    """创建默认 JSON 配置文件（v8.7：原子写）"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(defaults, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, defaults)
     return os.path.exists(path)
 
 def run_script(script_name, timeout=120):
@@ -286,7 +286,7 @@ def run_heal(json_path=None):
     # 1. 先运行自检（如果没有 JSON 文件）
     if not os.path.exists(json_path):
         log('INFO', 'No self-check JSON found, running _self_check.py...')
-        run_script(f'python "{BASE}/_self_check.py"', timeout=60)
+        run_script('_self_check.py', timeout=60)
         time.sleep(1)
 
     # 2. 加载自检结果
@@ -335,7 +335,7 @@ def run_heal(json_path=None):
 
     # 4. 修复后重新自检
     print(f"\n  --- Post-Repair Verification ---")
-    run_script(f'python "{BASE}/_self_check.py"', timeout=60)
+    run_script('_self_check.py', timeout=60)
     time.sleep(1)
 
     # 5. 读取修复后结果

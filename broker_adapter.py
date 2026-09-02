@@ -23,6 +23,7 @@ BROKER_DIR = os.path.join(BASE_DIR, 'broker_orders')
 
 # v8.7: 抽到 utils/calendar.py
 from utils.calendar import get_last_trading_day  # noqa: E402,F401
+from utils.file_io import atomic_write_json  # noqa: E402
 
 # ============================================================
 # 合规限制
@@ -245,8 +246,7 @@ def save_broker_orders(orders, order_data):
         '订单': em_orders,
         '风控提示': order_data.get('风控提示', []),
     }
-    with open(em_path, 'w', encoding='utf-8') as f:
-        json.dump(em_data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(em_path, em_data)
     saved_files.append(em_path)
 
     # 2. 同花顺导入格式 (CSV)

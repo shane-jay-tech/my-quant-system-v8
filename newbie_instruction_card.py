@@ -63,7 +63,8 @@ def generate_instruction_card(orders, protection=None):
 
     today = datetime.now().strftime('%Y-%m-%d')
     state = load_account_state()
-    total_capital = state.get('equity', 100000) if state else 100000
+    # v8.7 审查修复：不再写死 10 万——优先模拟账户 equity，其次 sim.initial_capital（当前约 2400）
+    total_capital = (state.get('equity') if state else None) or cfg_get('sim.initial_capital', 100000)
 
     # 保护期标签
     phase_label = ''

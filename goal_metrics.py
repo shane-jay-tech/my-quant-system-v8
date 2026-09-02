@@ -6,7 +6,7 @@
 1. 流水线成功率 —— 扫描 logs/pipeline_*.log 最近 20 个有终态的交易日运行；
    非交易日 [SKIP] 不计入分母；Alpha Gate 主动暂停视作成功（设计内行为）。
 2. 数据完整率 —— 读最新 reports/data_health_*.md 的 stock_csv / history / multi_vote 行。
-3. 测试/自检通过率 —— 读 reports/system_self_check_v86.json（每日测试代理指标）。
+3. 测试/自检通过率 —— 读 reports/system_self_check_v{version}.json（文件名跟随 SYSTEM_VERSION，每日测试代理指标）。
 
 输出：reports/goal_metrics_YYYYMMDD.md + 同名 json。任何文件缺失/解析失败都
 降级为 UNKNOWN 并继续，rc 恒为 0。
@@ -18,10 +18,18 @@ import re
 import sys
 from datetime import datetime
 
+from core.config import SYSTEM_VERSION
+from utils.file_io import atomic_write_json
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(BASE_DIR, 'logs')
 REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+
+
+def self_check_report_name() -> str:
+    """_self_check.py 的 JSON 报告名跟随 SYSTEM_VERSION（v8.6 -> v86）。"""
+    return f'system_self_check_v{SYSTEM_VERSION.replace(".", "")}.json'
 
 RECENT_LOG_LIMIT = 20
 DEFAULT_MIN_STOCK_ROWS = 4000
@@ -329,10 +337,10 @@ def compute_self_check_pass_rate(reports_dir=REPORTS_DIR):
         'passed': None, 'total': None, 'pass_rate_pct': None,
         'raw_evidence': [], 'error': None,
     }
-    path = os.path.join(reports_dir, 'system_self_check_v86.json')
+    path = os.path.join(reports_dir, self_check_report_name())
     out['source'] = os.path.basename(path)
     if not os.path.exists(path):
-        out['error'] = 'system_self_check_v86.json 不存在'
+        out['error'] = f'{self_check_report_name()} 不存在'
         return out
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -419,8 +427,7 @@ def write_report(report, reports_dir=REPORTS_DIR):
     json_path = os.path.join(reports_dir, f"goal_metrics_{report['date']}.json")
     with open(md_path, 'w', encoding='utf-8') as f:
         f.write(render_markdown(report))
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    atomic_write_json(json_path, report)
     return md_path, json_path
 
 

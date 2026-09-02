@@ -38,6 +38,8 @@ CORE_MODULES = [
     'portfolio_manager', 'data_validator', 'archive_old_data',
     'behavior_log', 'monthly_behavior_report', 'benchmark_comparison',
     'tracking_error_report',
+    # v8.7 预备：LLM 融合层（交付层 + shadow 分析师 + 统一通道）
+    'core.llm', 'digest', 'decision_replay', 'llm_analyst', 'bark_sender.channels',
 ]
 
 

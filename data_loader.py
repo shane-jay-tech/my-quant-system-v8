@@ -37,7 +37,13 @@ def _cache_path(name):
 def _load_cache(name):
     p = _cache_path(name)
     if os.path.exists(p):
-        return pd.read_csv(p, dtype={'代码': str})
+        try:
+            df = pd.read_csv(p, dtype={'代码': str})
+            if df is not None and len(df) > 0:
+                return df
+        except Exception as exc:
+            # v8.7 审查修复：半截缓存不再当有效数据，让上层走抓取
+            print(f"[DATA-LOADER] cache {name} 无效，忽略: {exc}", flush=True)
     return None
 
 
@@ -45,7 +51,10 @@ def _save_cache(name, df):
     if df is None or len(df) == 0:
         return
     p = _cache_path(name)
-    df.to_csv(p, index=False, encoding='utf-8-sig')
+    # v8.7 审查修复：写 .tmp + os.replace，抓取中断不会留下半截 CSV 被下次当缓存
+    tmp = p + '.tmp'
+    df.to_csv(tmp, index=False, encoding='utf-8-sig')
+    os.replace(tmp, p)
 
 
 # ---------- 基本面数据 ----------

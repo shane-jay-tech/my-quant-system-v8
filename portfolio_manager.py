@@ -31,6 +31,7 @@ STATE_FILE = os.path.join(DATA_DIR, 'portfolio_state.json')
 import sys
 sys.path.insert(0, BASE_DIR)
 from core.config import SYSTEM_VERSION
+from utils.file_io import atomic_write_json
 
 
 def _today_str():
@@ -54,11 +55,10 @@ def load_state():
 
 
 def save_state(state):
-    """保存持仓状态。"""
+    """保存持仓状态（v8.7：原子写，断电不留半截 JSON）。"""
     os.makedirs(DATA_DIR, exist_ok=True)
     state['as_of'] = _today_str()
-    with open(STATE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    atomic_write_json(STATE_FILE, state)
 
 
 def get_held_codes():

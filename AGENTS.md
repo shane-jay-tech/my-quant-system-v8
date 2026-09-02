@@ -221,6 +221,23 @@
 | 交易分析器 | `trade_analyzer.py` | 10种智能提醒+持仓分析+行为评估 |
 | 完整调仓计划 | `send_to_bark.py` v5 | 卖出→买入资金闭环，自动计算回收资金→分配买入 |
 
+## v8.7 预备：LLM 融合层（2026-09-02，shadow 起步）
+
+借鉴 TradingAgents-CN-studio（digest / notify / replay）与上游多空辩论思路，原则是**「算得清的管钱，说不清的管理解」**：规则仍是唯一下单依据，LLM 只做交付与 shadow 观点。
+
+| 模块 | 文件 | 功能 | 成本/安全 |
+|------|------|------|-----------|
+| 统一 LLM 通道 | `core/llm.py` | OpenAI 兼容 chat；key 只从 `DEEPSEEK_API_KEY` 或 `data/secrets.json:deepseek_api_key` 读；无 key `llm_available()=False` | 每次调用写 `cost_tracker`；默认 deepseek-v4-flash |
+| 开盘前简报 | `digest.py` | 当日 pick/orders/exit_advisor/Alpha Gate/研究 → 【结论】【信号】【风险】【动作】四段 ≤240 字；无 key 规则兜底 | 落 `results/digest_*.md` + `orders/digest_bark_*.txt`，`send_to_bark.py` 自动前置 |
+| 决策回放 | `decision_replay.py` | 市场/风控门/选股/订单/出场/shadow 观点 → 单文件 HTML | 纯本地零成本，`results/replay_*.html` |
+| 渠道注册表 | `bark_sender/channels.py` | Bark 保留 + webhook / 飞书，`type#别名` 多实例，逐渠道失败隔离 | 配置在 `secrets.json:notify_channels` 或 `QUANT_NOTIFY_WEBHOOK_URL` / `QUANT_FEISHU_WEBHOOK` |
+| shadow 多空分析 | `llm_analyst.py` | top3 候选：多头→空头→研究经理裁决 JSON；事实清单只含当日快照与 20 日 K 线派生 | **不改任何订单**；`llm_analyst.max_stocks`（默认 3）限成本；`--evaluate` 与 5 日前瞻收益对账 |
+
+**铁律**：
+- LLM 观点晋级为投票权重（进 `strategy_feedback`）的前提：shadow ≥ 20 条 verdict 且 `llm_analyst --evaluate` 命中率显著优于基线，且经多模型协作评审——在此之前只落盘、不影响资金。
+- 硬风控门（止损/回撤/仓位/成本门槛/Alpha Gate）永远不可被 LLM 覆盖。
+- 凭据零硬编码：v8.7 已删除 `bark_sender/config.py` 的硬编码 Bark token 回退，无 token 时 `send_bark()` 返回 False。
+
 ## 进化器优先级（v8.6 整理）
 
 系统里有三个进化器都在改 RSI/MA/仓位上限这些核心参数。为了避免互相覆盖，明确分工如下：

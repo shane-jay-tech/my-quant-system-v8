@@ -117,6 +117,8 @@ v85_new = ['portfolio_manager.py', 'data_validator.py', 'archive_old_data.py',
            'behavior_log.py', 'monthly_behavior_report.py',
            'benchmark_comparison.py', 'tracking_error_report.py', 'smoke_tests.py']
 v86_new = ['fetch_etf_data.py']
+# v8.7 预备：LLM 融合层（交付层 digest/replay/channels + shadow 分析师 + 统一 LLM 通道）
+v87_new = ['digest.py', 'decision_replay.py', 'llm_analyst.py', 'core/llm.py', 'bark_sender/channels.py']
 config_files = ['daily_pipeline.bat', 'app.py', 'CLAUDE.md',
                 'requirements.txt', 'core/config.py', 'real_trades.csv',
                 'weekly_health_check.bat', 'learning/first_week_guide.md']
@@ -129,7 +131,7 @@ sub_packages = [
     'app/__init__.py', 'app/styles.py', 'app/sidebar.py', 'app/loaders.py', 'app/pages.py',
 ]
 
-for mod in core_modules + v75_new + v85_new + v86_new + config_files + sub_packages:
+for mod in core_modules + v75_new + v85_new + v86_new + v87_new + config_files + sub_packages:
     exists = os.path.exists(os.path.join(BASE, mod))
     check(f'File: {mod}', 'file', exists)
 
@@ -256,27 +258,37 @@ except Exception as e:
 # Sim account
 sim_state = os.path.join(BASE, 'sim_results', 'account_state.json')
 if os.path.exists(sim_state):
-    with open(sim_state, 'r', encoding='utf-8') as f:
-        st = json.load(f)
-    check('Metric: sim equity', 'metric', st.get('equity', 0) > 0)
-    pos_count = len(st.get('positions', []))
-    warn('Metric: sim positions', 'metric', pos_count > 0, f'{pos_count} positions (fresh account OK)')
+    try:
+        with open(sim_state, 'r', encoding='utf-8') as f:
+            st = json.load(f)
+        check('Metric: sim equity', 'metric', st.get('equity', 0) > 0)
+        pos_count = len(st.get('positions', []))
+        warn('Metric: sim positions', 'metric', pos_count > 0, f'{pos_count} positions (fresh account OK)')
+    except Exception as e:
+        # v8.7 审查修复：状态文件损坏不应中断整份自检
+        warn('Metric: sim account', 'metric', False, f'account_state.json 读取失败: {e}')
 
 # Real trades
 real_file = os.path.join(BASE, 'real_trades.csv')
 if os.path.exists(real_file):
-    import pandas as pd
-    rt = pd.read_csv(real_file)
-    real_count = len(rt[~rt['备注'].str.contains('示例数据', na=False)]) if '备注' in rt.columns else len(rt)
-    check('Metric: real trades', 'metric', real_count > 0, f'{real_count} real trades')
+    try:
+        import pandas as pd
+        rt = pd.read_csv(real_file)
+        real_count = len(rt[~rt['备注'].str.contains('示例数据', na=False)]) if '备注' in rt.columns else len(rt)
+        check('Metric: real trades', 'metric', real_count > 0, f'{real_count} real trades')
+    except Exception as e:
+        warn('Metric: real trades', 'metric', False, f'real_trades.csv 读取失败: {e}')
 
 # Newbie status
 nbf = os.path.join(BASE, 'data', 'newbie_status.json')
 if os.path.exists(nbf):
-    with open(nbf, 'r', encoding='utf-8') as f:
-        nb = json.load(f)
-    check('Metric: protection phase', 'metric', nb['current_phase'] in ['observation', 'simulation', 'pre_live'],
-          f'Phase: {nb["current_phase"]}, Day: {nb["day_number"]}')
+    try:
+        with open(nbf, 'r', encoding='utf-8') as f:
+            nb = json.load(f)
+        check('Metric: protection phase', 'metric', nb['current_phase'] in ['observation', 'simulation', 'pre_live'],
+              f'Phase: {nb["current_phase"]}, Day: {nb["day_number"]}')
+    except Exception as e:
+        warn('Metric: protection phase', 'metric', False, f'newbie_status.json 读取失败: {e}')
 
 # ── 5. Data Quality ──
 print("\n[5] Data Quality")

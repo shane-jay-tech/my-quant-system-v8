@@ -15,8 +15,11 @@ import json
 from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE_DIR)
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+
+from utils.file_io import atomic_write_json  # noqa: E402
 
 # 追踪参数
 TRACK_DAYS = [1, 3, 5, 10]  # 追踪持有天数
@@ -25,16 +28,19 @@ TRACK_FILE = os.path.join(DATA_DIR, 'pick_performance.json')
 
 def load_tracker():
     if os.path.exists(TRACK_FILE):
-        with open(TRACK_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(TRACK_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as exc:
+            # v8.7 审查修复：坏文件不再中断追踪，降级为空模板并告警
+            print(f"[TRACK] pick_performance.json 读取失败，重置为空: {exc}")
     return {'records': [], 'summary': {}, 'updated': None}
 
 
 def save_tracker(tracker):
     os.makedirs(DATA_DIR, exist_ok=True)
     tracker['updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with open(TRACK_FILE, 'w', encoding='utf-8') as f:
-        json.dump(tracker, f, ensure_ascii=False, indent=2)
+    atomic_write_json(TRACK_FILE, tracker)
 
 
 def parse_pick_report(filepath):

@@ -8,7 +8,8 @@ sys.path.insert(0, BASE_DIR)
 try:
     from core.config import SYSTEM_VERSION
 except Exception:
-    SYSTEM_VERSION = "8.5"
+    # v8.7 审查修复：回退值不再写死旧版 8.5
+    SYSTEM_VERSION = "8.6"
 
 
 NAV_GROUPS = (

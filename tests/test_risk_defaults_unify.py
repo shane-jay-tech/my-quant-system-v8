@@ -72,8 +72,11 @@ def test_exit_advisor_effective_config_non_alert_allows_feedback_overrides(monke
 
 def test_exit_advisor_analyze_position_uses_effective_rules(monkeypatch):
     monkeypatch.setattr(exit_advisor, 'cfg_get', _sim_config_stub())
+    # entry_date 用"今天"而不是写死日期：hold_days 按 entry_date→now 的交易日数计算，
+    # 写死日期会让测试在若干天后自然失效（2026-09-02 曾因此误报 9 > 7）。
+    from datetime import datetime as _dt
     pos = {'code': '600000', 'name': '测试', 'entry_price': 10.0,
-           'entry_date': '2026-08-14', 'shares': 100, 'source': 'sim'}
+           'entry_date': _dt.now().strftime('%Y-%m-%d'), 'shares': 100, 'source': 'sim'}
     prices = {'600000': {'price': 10.0, 'name': '测试', 'change_pct': 0}}
     result = exit_advisor.analyze_position(
         pos, prices, history_df=None,

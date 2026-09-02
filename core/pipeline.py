@@ -56,6 +56,9 @@ PIPELINE_STEPS = {
     "sim_trade":           {"script": "sim_trade.py",             "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "模拟交易",          "unlock_hint": "始终启用（lite/full 由 tier 切换）"},
     "portfolio_risk":      {"script": "portfolio_risk.py",        "tiers": ["pro", "auto"],                         "schedule": "daily",                          "label": "组合风控 CVaR",     "unlock_hint": "Pro 级（20万+）"},
     "strategy_feedback":   {"script": "strategy_feedback.py",     "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "策略反馈闭环",      "unlock_hint": "始终启用"},
+    # v8.7 预备（LLM 融合层 P1）：shadow 多空分析只对 top3 跑，无 key 自动跳过，不改任何订单。
+    # 放在 strategy_feedback 之后、bark_push 之前：digest / decision_replay 会读取它的产出。
+    "llm_analyst":         {"script": "llm_analyst.py",           "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "shadow 多空分析",   "unlock_hint": "始终启用（需 DEEPSEEK_API_KEY，否则跳过）"},
     "broker_export":       {"script": "broker_adapter.py",        "tiers": ["auto"],                                "schedule": "daily",                          "label": "券商订单生成",      "unlock_hint": "Auto 级（50万+API）"},
     "research_agent":      {"script": "research_agent.py",        "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "args": ["--daily", "今日市场特征复盘 v8策略未来3天胜率预估 大盘择时信号"], "label": "市场研究复盘", "unlock_hint": "始终启用"},
     "integrate_knowledge": {"script": "integrate_knowledge.py",   "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "知识内化",          "unlock_hint": "始终启用"},
@@ -65,6 +68,10 @@ PIPELINE_STEPS = {
     "cost_tracker":        {"script": "cost_tracker.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "佣金/成本审计",     "unlock_hint": "始终启用"},
     "portfolio_sync":      {"script": "portfolio_manager.py",     "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "持仓状态同步",      "unlock_hint": "始终启用（exit/订单 → 持仓）"},
     "behavior_log":        {"script": "behavior_log.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "行为日志记录",      "unlock_hint": "始终启用"},
+    # v8.7 预备（交付层 P0）：digest 生成四段简报（无 key 规则兜底），decision_replay 生成决策回放 HTML（纯本地）。
+    # 必须排在 bark_push 之前：send_to_bark.py 会把当日 digest 前置到推送正文。
+    "digest":              {"script": "digest.py",                "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "开盘前简报",        "unlock_hint": "始终启用（无 LLM key 走规则兜底）"},
+    "decision_replay":     {"script": "decision_replay.py",       "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "决策回放 HTML",     "unlock_hint": "始终启用（纯本地，零成本）"},
     "bark_push":           {"script": "send_to_bark.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "Bark 推送",         "unlock_hint": "始终启用"},
     "goal_metrics":        {"script": "goal_metrics.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "目标指标",          "unlock_hint": "始终启用（流水线成功率/数据完整率/自检通过率）"},
     "self_check":          {"script": "_self_check.py",           "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "系统自检",          "unlock_hint": "始终启用"},

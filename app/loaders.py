@@ -17,6 +17,37 @@ def _pipeline_python():
     """
     return os.environ.get("QUANT_PYTHON") or sys.executable
 
+
+def parse_pick_line(parts):
+    """统一解析 pick_*.md 表格行（v8.7 审查重构：三处重复逻辑收敛到一处）。
+
+    兼容 v8.6 新老表头：老 13 列（无板块），新 14 列（parts[3]=板块，最新价后移到 parts[4]）。
+    parts 是 split('|') 后 strip 过的非空列表。解析失败返回 None。
+    """
+    if len(parts) < 8:
+        return None
+    try:
+        float(parts[3])
+        o = 0  # 老格式：parts[3] 是最新价
+    except (ValueError, TypeError):
+        o = 1  # 新格式：parts[3] 是板块
+    try:
+        return {
+            '排名': int(parts[0]), '代码': parts[1], '名称': parts[2],
+            '最新价': float(parts[3 + o]),
+            '涨跌幅': float(parts[4 + o]) if parts[4 + o] != '0.00' else 0.0,
+            'MA5': float(parts[5 + o]), 'MA20': float(parts[6 + o]),
+            'RSI': float(parts[7 + o]),
+            '量比': float(parts[8 + o]) if len(parts) > 8 + o else 0,
+            '市值亿': float(parts[9 + o]) if len(parts) > 9 + o else 0,
+            '评分': int(parts[10 + o]) if len(parts) > 10 + o else 0,
+            '风险': parts[11 + o] if len(parts) > 11 + o else '-',
+            '选入理由': parts[12 + o] if len(parts) > 12 + o else '-',
+        }
+    except (ValueError, IndexError):
+        return None
+
+
 @st.cache_data(ttl=60)
 def load_latest_picks():
     files = sorted(glob.glob(os.path.join(RESULTS_DIR, 'pick_*.md')), reverse=True)
@@ -25,76 +56,71 @@ def load_latest_picks():
     latest = files[0]
     date_match = re.search(r'pick_(\d{8})', os.path.basename(latest))
     pick_date = date_match.group(1) if date_match else '未知'
-    with open(latest, 'r', encoding='utf-8') as f:
-        content = f.read()
+    try:
+        with open(latest, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as exc:
+        st.warning(f"选股报告读取失败：{exc}")
+        return None, pick_date, latest
     stocks = []
     for line in content.split('\n'):
         if re.match(r'\|\s*\d+\s*\|\s*\d{6}\s*\|', line):
             parts = [p.strip() for p in line.split('|') if p.strip()]
-            if len(parts) >= 8:
-                # v8.6: 兼容新老表头 — 老13列(无板块)/新14列(有板块)
-                # parts[3] 能转 float 即老格式（最新价）；否则新格式（板块），偏移 +1
-                try:
-                    float(parts[3])
-                    o = 0  # 老格式偏移
-                except ValueError:
-                    o = 1  # 新格式：板块占位 parts[3]，最新价后移到 parts[4]
-                try:
-                    stocks.append({
-                        '排名': int(parts[0]), '代码': parts[1], '名称': parts[2],
-                        '最新价': float(parts[3 + o]),
-                        '涨跌幅': float(parts[4 + o]) if parts[4 + o] != '0.00' else 0.0,
-                        'MA5': float(parts[5 + o]), 'MA20': float(parts[6 + o]),
-                        'RSI': float(parts[7 + o]),
-                        '量比': float(parts[8 + o]) if len(parts) > 8 + o else 0,
-                        '市值亿': float(parts[9 + o]) if len(parts) > 9 + o else 0,
-                        '评分': int(parts[10 + o]) if len(parts) > 10 + o else 0,
-                        '风险': parts[11 + o] if len(parts) > 11 + o else '-',
-                        '选入理由': parts[12 + o] if len(parts) > 12 + o else '-',
-                    })
-                except (ValueError, IndexError):
-                    continue
+            row = parse_pick_line(parts)
+            if row:
+                stocks.append(row)
     return pd.DataFrame(stocks), pick_date, latest
 
 
 @st.cache_data(ttl=600)
-
-
 def load_index_data():
     f = os.path.join(DATA_DIR, 'hs300_index.csv')
     if not os.path.exists(f):
         return None
-    df = pd.read_csv(f)
-    df['日期'] = pd.to_datetime(df['日期'])
-    df = df.sort_values('日期')
-    df['MA20'] = df['收盘'].rolling(20).mean()
-    df['MA5'] = df['收盘'].rolling(5).mean()
-    df['ret'] = df['收盘'].pct_change()
-    return df
+    try:
+        df = pd.read_csv(f)
+    except Exception as exc:
+        st.warning(f"沪深300 指数数据读取失败：{exc}")
+        return None
+    if df is None or len(df) < 2 or '日期' not in df.columns or '收盘' not in df.columns:
+        st.warning("沪深300 指数数据不足（空文件或缺少日期/收盘列）")
+        return None
+    try:
+        df['日期'] = pd.to_datetime(df['日期'])
+        df = df.sort_values('日期')
+        df['MA20'] = df['收盘'].rolling(20).mean()
+        df['MA5'] = df['收盘'].rolling(5).mean()
+        df['ret'] = df['收盘'].pct_change()
+        return df
+    except Exception as exc:
+        st.warning(f"沪深300 指标计算失败：{exc}")
+        return None
 
 
-
-
+@st.cache_data(ttl=60)
 def load_evaluation():
     f = os.path.join(RESULTS_DIR, 'honest_evaluation.md')
     if not os.path.exists(f):
         return None
-    with open(f, 'r', encoding='utf-8') as fh:
-        return fh.read()
+    try:
+        with open(f, 'r', encoding='utf-8') as fh:
+            return fh.read()
+    except Exception:
+        return None
 
 
-
-
+@st.cache_data(ttl=60)
 def load_daily_insight():
     files = sorted(glob.glob(os.path.join(REPORTS_DIR, 'daily_insight_*.md')), reverse=True)
     if not files:
         files = sorted(glob.glob(os.path.join(REPORTS_DIR, 'ab_test_*.md')), reverse=True)
     if not files:
         return None
-    with open(files[0], 'r', encoding='utf-8') as f:
-        return f.read()[:3000]
-
-
+    try:
+        with open(files[0], 'r', encoding='utf-8') as f:
+            return f.read()[:3000]
+    except Exception:
+        return None
 
 
 def run_pipeline_step(script, label, timeout=300):
@@ -144,25 +170,19 @@ def load_all_system_picks():
         if not dm:
             continue
         pdate = dm.group(1)
-        with open(pf, 'r', encoding='utf-8') as fh:
-            pcontent = fh.read()
+        try:
+            with open(pf, 'r', encoding='utf-8') as fh:
+                pcontent = fh.read()
+        except Exception:
+            continue
         for line in pcontent.split('\n'):
             if re.match(r'\|\s*\d+\s*\|\s*\d{6}\s*\|', line):
                 parts = [p.strip() for p in line.split('|') if p.strip()]
-                if len(parts) < 7:
-                    continue
-                try:
-                    code = parts[1]
-                    name = parts[2]
-                    try:
-                        price = float(parts[3])
-                    except ValueError:
-                        price = float(parts[4]) if len(parts) > 4 else 0.0
+                row = parse_pick_line(parts)
+                if row:
                     all_records.append({
-                        '选股日期': pdate, '代码': code, '名称': name, '入场价': price
+                        '选股日期': pdate, '代码': row['代码'], '名称': row['名称'], '入场价': row['最新价'],
                     })
-                except (ValueError, IndexError):
-                    continue
     return pd.DataFrame(all_records) if all_records else pd.DataFrame()
 
 
@@ -171,16 +191,18 @@ def load_current_prices():
     stock_files = sorted(glob.glob(os.path.join(DATA_DIR, 'stock_*.csv')), reverse=True)
     if not stock_files:
         return {}
-    df = pd.read_csv(stock_files[0], dtype={'代码': str})
-    prices = {}
-    for _, row in df.iterrows():
-        code = str(row['代码']).zfill(6)
-        prices[code] = {
-            'name': str(row.get('名称', '')),
-            'price': float(row.get('最新价', 0)),
-        }
-    return prices
-
-
-
-
+    try:
+        df = pd.read_csv(stock_files[0], dtype={'代码': str})
+    except Exception as exc:
+        st.warning(f"行情文件读取失败：{exc}")
+        return {}
+    if df is None or df.empty or '代码' not in df.columns:
+        return {}
+    # v8.7 审查优化：去掉逐行 iterrows，向量化构建字典
+    df = df.assign(_code=df['代码'].astype(str).str.zfill(6))
+    name = df.get('名称', pd.Series('', index=df.index)).astype(str)
+    price = pd.to_numeric(df.get('最新价', pd.Series(0, index=df.index)), errors='coerce').fillna(0.0)
+    return {
+        code: {'name': str(n), 'price': float(p)}
+        for code, n, p in zip(df['_code'], name, price)
+    }

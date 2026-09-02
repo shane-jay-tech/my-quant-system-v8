@@ -1,63 +1,42 @@
 """
-Bark 推送模块 v5
-- 选股TOP10 + 有说服力的入选理由（证据链）
-- 明日操作参考（买多少、怎么买、什么时候止损）
-- 支持 --simple / --standard / --research 三模式
-- v7: 板块集中度风险提示
-- v5: 完整调仓计划（卖出→买入资金闭环）
-"""
-import requests
-import os
-import sys
-import glob
-import re
-import json
-from datetime import datetime
+Bark 推送模块配置（v8.7 清理版）
 
-# 统一板块分类
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+- Bark token 只从 data/secrets.json 读取（bark_tokens 列表优先，其次 bark_token 单值）
+- v8.7: 删除源码里的硬编码 token 回退——凭据零硬编码；没配 token 时 BARK_TOKENS 为空列表，
+  send_bark() 会明确返回 False 并打印迁移提示，不再静默"假成功"
+- v8.7: 删除 RESULTS_DIR/REPORTS_DIR 等指向 bark_sender/ 子目录的错误常量（从未被引用，
+  且与 parsers.py 里指向项目根的同名常量冲突）
+"""
+import os
+import json
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# v7.5: Bark Token 从 secrets.json 读取，不再硬编码
 _PROJECT_ROOT = os.path.dirname(BASE_DIR)
 _SECRETS_PATH = os.path.join(_PROJECT_ROOT, 'data', 'secrets.json')
 
-def _load_bark_token():
-    if os.path.exists(_SECRETS_PATH):
-        try:
-            with open(_SECRETS_PATH, 'r', encoding='utf-8') as f:
-                secrets = json.load(f)
-            token = secrets.get('bark_token', '')
-            if token:
-                return token
-        except Exception:
-            pass
-    # Fallback（兼容旧系统，首次运行时提示迁移）
-    return "C2910EED8E6540BEBFE994A01A107C58"
 
-BARK_TOKEN = _load_bark_token()
+def _read_secrets() -> dict:
+    if not os.path.exists(_SECRETS_PATH):
+        return {}
+    try:
+        with open(_SECRETS_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-def _load_bark_tokens():
-    if os.path.exists(_SECRETS_PATH):
-        try:
-            with open(_SECRETS_PATH, 'r', encoding='utf-8') as f:
-                secrets = json.load(f)
-            tokens = secrets.get('bark_tokens', [])
-            if tokens:
-                return tokens
-            token = secrets.get('bark_token', '')
-            if token:
-                return [token]
-        except Exception:
-            pass
-    return ["C2910EED8E6540BEBFE994A01A107C58"]
+
+def _load_bark_tokens() -> list:
+    sec = _read_secrets()
+    tokens = sec.get('bark_tokens') or []
+    if isinstance(tokens, list) and tokens:
+        return [str(t) for t in tokens if t]
+    token = sec.get('bark_token', '')
+    if token:
+        return [str(token)]
+    print("[BARK] 未配置 Bark token：请在 data/secrets.json 写入 bark_tokens 列表", flush=True)
+    return []
+
 
 BARK_TOKENS = _load_bark_tokens()
-
-RESULTS_DIR = os.path.join(BASE_DIR, 'results')
-REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-SIM_DIR = os.path.join(BASE_DIR, 'sim_results')
-ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
-
+BARK_TOKEN = BARK_TOKENS[0] if BARK_TOKENS else ''

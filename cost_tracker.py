@@ -274,8 +274,8 @@ def main():
     print(f"  成本审计模块 v1 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*50}")
 
-    # 记录本次调用
-    log_llm_call('cost_tracker', '成本审计报告生成')
+    # v8.7 审查修复：成本审计本身是本地步骤，不再记入 LLM 成本日志
+    # （旧版会虚增每日/每月 LLM 调用次数与成本）。
 
     # 生成审计报告
     report = generate_daily_audit()

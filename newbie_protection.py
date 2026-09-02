@@ -21,6 +21,9 @@ PSYCH_DIR = os.path.join(BASE_DIR, 'psychology')
 STATUS_FILE = os.path.join(DATA_DIR, 'newbie_status.json')
 ACTIVITY_FILE = os.path.join(DATA_DIR, 'user_activity.json')
 
+sys.path.insert(0, BASE_DIR)
+from utils.file_io import atomic_write_json
+
 PHASES = {
     'observation': {'days': (0, 5), 'label': '观察期', 'css_class': 'observation'},
     'simulation': {'days': (6, 10), 'label': '模拟期', 'css_class': 'simulation'},
@@ -52,10 +55,9 @@ def init_newbie_status():
 
 
 def save_newbie_status(status):
-    """保存新手状态"""
+    """保存新手状态（v8.7：原子写）"""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(STATUS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(status, f, ensure_ascii=False, indent=2)
+    atomic_write_json(STATUS_FILE, status)
 
 
 def update_newbie_status():
@@ -265,10 +267,9 @@ def _load_activity():
 
 
 def _save_activity(activity):
-    """保存用户活动记录"""
+    """保存用户活动记录（v8.7：原子写）"""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(ACTIVITY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(activity, f, ensure_ascii=False, indent=2)
+    atomic_write_json(ACTIVITY_FILE, activity)
 
 
 def record_learning_visit():

@@ -161,41 +161,6 @@ def _parse_exit_advisor_sells():
     return sells
 
 
-def _lookup_position_shares(code):
-    """查找某只股票的总持仓股数（模拟+真实）"""
-    total_shares = 0
-
-    # 1. 模拟持仓
-    sim_path = os.path.join(SIM_DIR, 'account_state.json')
-    if os.path.exists(sim_path):
-        try:
-            with open(sim_path, 'r', encoding='utf-8') as f:
-                state = json.load(f)
-            for pos in state.get('positions', []):
-                if pos.get('code', '') == code:
-                    total_shares += int(pos.get('shares', 0))
-        except Exception:
-            pass
-
-    # 2. 真实持仓
-    real_path = os.path.join(BASE_DIR, 'real_trades.csv')
-    if os.path.exists(real_path):
-        try:
-            import pandas as pd
-            df = pd.read_csv(real_path, dtype={'代码': str})
-            if '备注' in df.columns:
-                df = df[~df['备注'].str.contains('示例', na=False)]
-            for c, group in df.groupby('代码'):
-                if c.zfill(6) == code.zfill(6):
-                    buys = group[group['方向'] == '买入']['数量'].sum()
-                    sells = group[group['方向'] == '卖出']['数量'].sum() if '卖出' in group['方向'].values else 0
-                    total_shares += int(buys - sells)
-        except Exception:
-            pass
-
-    return total_shares
-
-
 def _parse_daily_orders_buys():
     """从最新daily_orders文件中提取买入清单"""
     order_files = sorted(

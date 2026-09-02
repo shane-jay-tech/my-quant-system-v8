@@ -11,6 +11,37 @@ from bark_sender.parsers import find_latest_report, parse_report_full, parse_hon
 from bark_sender.formatters import build_personalized_section
 from bark_sender.builders import build_bark_message, build_bark_message_simple, build_bark_message_research, build_bark_message_for_tier
 from bark_sender.push import send_bark, send_from_newbie_file
+from bark_sender.channels import push_all
+
+ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
+
+
+def load_digest(pick_date):
+    """v8.7: 读取 digest.py 生成的 orders/digest_bark_YYYYMMDD.txt，返回 (title, body) 或 None。"""
+    d = str(pick_date or '').replace('-', '')
+    if len(d) != 8:
+        return None
+    path = os.path.join(ORDERS_DIR, f'digest_bark_{d}.txt')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return None
+    if not lines or not lines[0].startswith('TITLE: '):
+        return None
+    title = lines[0][7:].strip()
+    body = '\n'.join(lines[1:]).strip()
+    return (title, body) if body else None
+
+
+def push(title, body):
+    """v8.7: 走渠道注册表（Bark + 可选 webhook/飞书），逐渠道打印结果。"""
+    results = push_all(title, body)
+    for line in results:
+        print(f"[PUSH] {line}")
+    return any(line.startswith('OK') for line in results)
 
 
 def main():
@@ -21,6 +52,7 @@ def main():
     parser.add_argument('--newbie', action='store_true', help='读取新手预生成文件')
     parser.add_argument('--dry-run', action='store_true', help='仅生成内容，不推送')
     parser.add_argument('--file', type=str, help='从指定文件读取内容推送')
+    parser.add_argument('--no-digest', action='store_true', help='不前置当日开盘前简报')
     args = parser.parse_args()
 
     if args.newbie:
@@ -31,7 +63,7 @@ def main():
             body = f.read()
         title = "量化系统通知"
         if not args.dry_run:
-            send_bark(title, body)
+            push(title, body)
         else:
             print(f"[DRY-RUN] Title: {title}\nBody: {body[:200]}...")
         return 0
@@ -55,8 +87,19 @@ def main():
         if personalized:
             body += "\n\n" + "\n".join(personalized)
 
+    # v8.7: 当日四段简报前置——开盘前 5 分钟先读这 200 字，细节在下面
+    if not args.no_digest:
+        digest = load_digest(pick_date)
+        if digest:
+            d_title, d_body = digest
+            title = d_title
+            body = f"{d_body}\n\n────────\n{body}"
+            print("[BARK] digest prepended")
+        else:
+            print("[BARK] no digest for today, push standard message only")
+
     if not args.dry_run:
-        send_bark(title, body)
+        push(title, body)
     else:
         print(f"[DRY-RUN] Title: {title}\nBody preview:\n{body[:500]}...")
 

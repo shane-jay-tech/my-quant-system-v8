@@ -18,7 +18,8 @@ REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
 
 from .loaders import (
 load_latest_picks, load_index_data, load_evaluation,
-load_daily_insight, run_pipeline_step, load_all_system_picks, load_current_prices
+load_daily_insight, run_pipeline_step, load_all_system_picks, load_current_prices,
+parse_pick_line
 )
 
 def render_picks_page():
@@ -642,8 +643,13 @@ def render_sim_trading_page():
     # 首屏先回答“账户现在怎样”，再进入订单与分析。
     if os.path.exists(sim_state):
         import json as _json
-        with open(sim_state, 'r', encoding='utf-8') as f:
-            state = _json.load(f)
+        try:
+            with open(sim_state, 'r', encoding='utf-8') as f:
+                state = _json.load(f)
+        except Exception as exc:
+            # v8.7 审查修复：损坏的账户文件不再让整页崩溃，降级为"未初始化"概览
+            state = {}
+            st.warning(f"模拟账户文件读取失败，账户概览已降级：{exc}")
         from core.config import get as _cfg_get
         initial_capital = float(state.get('initial_capital') or _cfg_get('sim.initial_capital', 2400))
         equity = state.get('equity', initial_capital)
@@ -693,7 +699,11 @@ def render_sim_trading_page():
         st.divider()
         st.subheader("权益曲线")
         if os.path.exists(sim_equity):
-            eq_df = pd.read_csv(sim_equity)
+            try:
+                eq_df = pd.read_csv(sim_equity)
+            except Exception as exc:
+                eq_df = pd.DataFrame()
+                st.caption(f"权益曲线文件读取失败：{exc}")
             if len(eq_df) > 1:
                 import plotly.graph_objects as go
                 fig = go.Figure()
@@ -729,7 +739,11 @@ def render_sim_trading_page():
         st.divider()
         st.subheader("交易历史")
         if os.path.exists(sim_trades):
-            trades_df = pd.read_csv(sim_trades)
+            try:
+                trades_df = pd.read_csv(sim_trades)
+            except Exception as exc:
+                trades_df = pd.DataFrame()
+                st.caption(f"交易历史文件读取失败：{exc}")
             if len(trades_df) > 0:
                 st.dataframe(trades_df.tail(20), width="stretch", hide_index=True)
                 # 出场统计
@@ -949,7 +963,12 @@ def render_my_trades_page():
     st.caption("先看当前持仓与系统建议，再录入成交；历史记录和情绪反馈用于复盘。")
 
     # ── 当前持仓分析 ──（带缓存：原来每次页面交互都重算一遍全部选股文件）
-    pos_result = _cached_analyze_positions(BASE_DIR)
+    try:
+        pos_result = _cached_analyze_positions(BASE_DIR)
+    except Exception as exc:
+        # v8.7 审查修复：交易数据异常不再阻断整页，录入表单照常可用
+        pos_result = {}
+        st.warning(f"持仓智能分析暂不可用（可继续录入成交）：{exc}")
     positions = pos_result.get('positions', [])
     pos_recs = pos_result.get('recommendations', [])
     pos_summary = pos_result.get('summary', {})
@@ -1030,23 +1049,20 @@ def render_my_trades_page():
             st.subheader("📊 持仓 vs 今日推荐")
             st.caption("以下今日推荐股票是你尚未持有的，可作为新增仓位的参考。")
 
-            with open(today_picks_file[0], 'r', encoding='utf-8') as f:
-                pick_content = f.read()
+            try:
+                with open(today_picks_file[0], 'r', encoding='utf-8') as f:
+                    pick_content = f.read()
+            except Exception:
+                pick_content = ''
 
             held_codes = set(p['代码'] for p in positions)
             new_picks = []
             for line in pick_content.split('\n'):
                 if re.match(r'\|\s*\d+\s*\|\s*\d{6}\s*\|', line):
                     parts = [p.strip() for p in line.split('|') if p.strip()]
-                    if len(parts) >= 7:
-                        code = parts[1]
-                        if code not in held_codes:
-                            name = parts[2]
-                            try:
-                                price = float(parts[3])
-                            except ValueError:
-                                price = float(parts[4]) if len(parts) > 4 else 0.0
-                            new_picks.append({'代码': code, '名称': name, '推荐价': price})
+                    row = parse_pick_line(parts)
+                    if row and row['代码'] not in held_codes:
+                        new_picks.append({'代码': row['代码'], '名称': row['名称'], '推荐价': row['最新价']})
 
             if new_picks:
                 st.markdown("**建议关注（未持有 + 系统推荐）：**")
@@ -1293,8 +1309,13 @@ def render_system_health_page():
         st.info("暂无健康检查数据。运行 _self_check.py 生成。")
     else:
         if json_files:
-            with open(json_files[0], 'r', encoding='utf-8') as f:
-                health_data = _json.load(f)
+            try:
+                with open(json_files[0], 'r', encoding='utf-8') as f:
+                    health_data = _json.load(f)
+            except Exception as exc:
+                # v8.7 审查修复：损坏的自检 JSON 不再让整页崩溃
+                health_data = {}
+                st.warning(f"自检 JSON 读取失败，以下仅展示报告文件：{exc}")
             total = health_data.get('score', {}).get('total', 0)
             passed = health_data.get('score', {}).get('passed', 0)
             warn_n = health_data.get('score', {}).get('warn', 0)
