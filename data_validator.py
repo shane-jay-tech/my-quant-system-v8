@@ -79,12 +79,19 @@ def check_history_csv():
     metrics['latest_date'] = latest_date.isoformat()
 
     today = date.today()
-    lag_days = (today - latest_date).days
+    # v8.7 修复：统一用交易日口径（_self_check 也用交易日），跨周末/长假不再打架
+    try:
+        from utils.calendar import count_trading_days
+        lag_days = max(0, count_trading_days(latest_date, today, data_dir=DATA_DIR) - 1)
+        metrics['lag_unit'] = 'trading_days'
+    except Exception:
+        lag_days = (today - latest_date).days
+        metrics['lag_unit'] = 'calendar_days'
     metrics['lag_days'] = lag_days
 
     max_lag = cfg_get('data_validation.max_history_lag_days', 5)
     if lag_days > max_lag:
-        return {'status': 'WARN', 'reason': f'history lag {lag_days} days > {max_lag}', 'metrics': metrics}
+        return {'status': 'WARN', 'reason': f'history lag {lag_days} trading days > {max_lag}', 'metrics': metrics}
 
     return {'status': 'OK', 'reason': '', 'metrics': metrics}
 

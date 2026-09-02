@@ -305,7 +305,6 @@ def compute_data_completeness(reports_dir=REPORTS_DIR, data_dir=DATA_DIR):
     out['coverage_missing_days'] = coverage['missing_days']
     out['raw_evidence'] += coverage['raw_evidence']
     cov_status = coverage['status']
-    cov_pct = coverage['coverage_pct']
 
     pct = out['completeness_pct']
     snapshot_status = 'UNKNOWN'

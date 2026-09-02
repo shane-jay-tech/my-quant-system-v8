@@ -88,23 +88,24 @@ def save_arena_state(state):
 def evaluate_strategy(strategy_id, lookback_days=REBALANCE_DAYS):
     """
     评估单个策略近 N 日的模拟表现。
-    从 sim_results 中提取该策略的权益曲线（如果有的话）。
-    当前简化：读取统一模拟盘作为代理。
+    v8.7 修复：优先读取该策略专属的 sim_results/arena_<id>_equity.csv；
+    不存在时退回统一 equity_curve.csv，但明确标记 proxy=True——旧版所有策略
+    共读同一文件，排名完全等价于随机淘汰。
     """
-    # 实际实现中，每个策略应有独立的 sim 账户
-    # 此处简化：用 pick_tracker 或 equity_curve 的历史收益作为代理
-    equity_file = os.path.join(SIM_DIR, 'equity_curve.csv')
+    own_file = os.path.join(SIM_DIR, f'arena_{strategy_id}_equity.csv')
+    equity_file = own_file if os.path.exists(own_file) else os.path.join(SIM_DIR, 'equity_curve.csv')
+    proxy = not os.path.exists(own_file)
     if not os.path.exists(equity_file):
-        return {'sharpe': 0, 'max_dd': 0, 'return': 0, 'score': 0}
+        return {'sharpe': 0, 'max_dd': 0, 'return': 0, 'score': 0, 'proxy': proxy}
 
     df = pd.read_csv(equity_file)
     if '总权益' not in df.columns or len(df) < lookback_days // 2:
-        return {'sharpe': 0, 'max_dd': 0, 'return': 0, 'score': 0}
+        return {'sharpe': 0, 'max_dd': 0, 'return': 0, 'score': 0, 'proxy': proxy}
 
     recent = df.tail(lookback_days)
     ret = recent['总权益'].pct_change().dropna()
     if len(ret) < 5 or ret.std() == 0:
-        return {'sharpe': 0, 'max_dd': 0, 'return': 0, 'score': 0}
+        return {'sharpe': 0, 'max_dd': 0, 'return': 0, 'score': 0, 'proxy': proxy}
 
     sharpe = (ret.mean() / ret.std()) * np.sqrt(252)
     # 最大回撤
@@ -118,6 +119,7 @@ def evaluate_strategy(strategy_id, lookback_days=REBALANCE_DAYS):
         'max_dd': round(max_dd, 4),
         'return': round(total_ret, 4),
         'score': round(sharpe - max_dd * 5, 4),  # 综合评分：夏普 - 5×最大回撤
+        'proxy': proxy,
     }
 
 
@@ -132,6 +134,16 @@ def run_evaluation(state):
         s['metrics'] = metrics
         s['score'] = metrics['score']
         print(f"  {s['name']}: return={metrics['return']:.2%}, sharpe={metrics['sharpe']:.2f}, max_dd={metrics['max_dd']:.2%}, score={metrics['score']:.3f}")
+
+    # v8.7 修复：所有策略都只有"共享权益曲线代理"时，分数同质，淘汰≈随机淘汰——
+    # 本轮只记录排名、不淘汰不变异；等有 arena_<id>_equity.csv 专属数据后再进入真实竞技。
+    if strategies and all(s['metrics'].get('proxy') for s in strategies):
+        print('[ARENA] All metrics are proxy (shared equity_curve). Skip elimination this round; '
+              'each strategy needs its own sim_results/arena_<id>_equity.csv for real ranking.')
+        state['last_eval'] = datetime.now().strftime('%Y-%m-%d')
+        state['proxy_only'] = True
+        save_arena_state(state)
+        return state
 
     # 排序
     strategies.sort(key=lambda x: x.get('score', 0), reverse=True)
@@ -180,7 +192,7 @@ def generate_report(state):
         m = s.get('metrics', {})
         p = s['params']
         lines.append(
-            f"| {rank} | {s['name']} | {p['MA_LONG']} | {p['RSI_LOW']}-{p['RSI_HIGH']} | "
+            f"| {rank} | {s['name']}{'（代理）' if m.get('proxy') else ''} | {p['MA_LONG']} | {p['RSI_LOW']}-{p['RSI_HIGH']} | "
             f"{p['TOP_N']} | {p['STOP_LOSS']:.0%} | {m.get('return', 0):.2%} | "
             f"{m.get('sharpe', 0):.2f} | {m.get('max_dd', 0):.2%} | {m.get('score', 0):.3f} |"
         )

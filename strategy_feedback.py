@@ -41,7 +41,7 @@ def load_history_data():
     return df
 
 
-def calc_forward_returns(pick_date, code, history_df, horizon_days=[3, 5, 10]):
+def calc_forward_returns(pick_date, code, history_df, horizon_days=None):
     """
     计算选股后N个交易日的实际收益
 
@@ -49,11 +49,13 @@ def calc_forward_returns(pick_date, code, history_df, horizon_days=[3, 5, 10]):
         pick_date: 选股日期 (str 'YYYY-MM-DD' or datetime)
         code: 股票代码
         history_df: 历史K线
-        horizon_days: 前瞻天数列表
+        horizon_days: 前瞻天数列表（默认 3/5/10）
 
     Returns:
         dict: {f'ret_{d}d': float or None, ...}
     """
+    if horizon_days is None:
+        horizon_days = (3, 5, 10)  # v8.7 修复：不用可变列表做默认参数
     if isinstance(pick_date, str):
         pick_date = pd.to_datetime(pick_date)
 
@@ -75,14 +77,15 @@ def calc_forward_returns(pick_date, code, history_df, horizon_days=[3, 5, 10]):
         # 在前向窗口中找N日后的价格
         stock_hist_after = stock_hist[stock_hist['日期'] > pick_date]
     else:
-        pick_idx = pick_day_data.index[-1]
         entry_price = pick_day_data.iloc[-1]['收盘']
         stock_hist_after = stock_hist[stock_hist['日期'] > pick_date]
 
     results = {}
     for d in horizon_days:
         future_data = stock_hist_after.head(d)
-        if len(future_data) >= min(d, 1):
+        # v8.7 修复：必须攒满 d 个交易日的未来数据才算 d 日收益；
+        # 旧代码 len>=min(d,1) 只要 1 天就把 1 日收益冒充成 3/5/10 日收益，污染反馈权重。
+        if len(future_data) >= d:
             exit_price = future_data.iloc[-1]['收盘']
             ret = (exit_price / entry_price - 1) * 100
             results[f'ret_{d}d'] = round(ret, 2)
@@ -190,9 +193,10 @@ def generate_forward_returns_file(analysis_df):
         平均3日收益=('3日收益', 'mean'),
         平均5日收益=('5日收益', 'mean'),
         平均10日收益=('10日收益', 'mean'),
-        胜率3日=('3日收益', lambda x: (x > 0).mean()),
-        胜率5日=('5日收益', lambda x: (x > 0).mean()),
-        胜率10日=('10日收益', lambda x: (x > 0).mean()),
+        # v8.7 修复：dropna 后再算胜率——短窗口返回 None 的样本不得被当成"亏损"
+        胜率3日=('3日收益', lambda x: (x.dropna() > 0).mean()),
+        胜率5日=('5日收益', lambda x: (x.dropna() > 0).mean()),
+        胜率10日=('10日收益', lambda x: (x.dropna() > 0).mean()),
         选股数量=('代码', 'count'),
     ).reset_index()
 
@@ -206,6 +210,8 @@ def generate_forward_returns_file(analysis_df):
     # 策略, 5日收益 (主要优化目标), 选股日期
     output = summary[['选股日期', '策略', '5日收益', '胜率5日', '选股数量']].copy()
     output.columns = ['日期', '策略', '5日收益', '5日胜率', '选股数']
+    # v8.7 修复：整组 5 日数据尚未攒满（NaN）的行不进入策略权重，防止"无数据=0胜率"拉低权重
+    output = output.dropna(subset=['5日收益', '5日胜率'])
 
     path = os.path.join(DATA_DIR, 'strategy_forward_returns.csv')
     output.to_csv(path, index=False, encoding='utf-8-sig')
@@ -434,7 +440,9 @@ def analyze_risk_adjustments(cold_start_data=None):
                        else (buy_trades['价格'] * buy_trades['数量']).sum())
 
         if closed_count == 0:
-            # 真实交易存在但全是开仓：metrics 显示当前敞口，不调任何参数
+            # 真实交易存在但全是开仓：metrics 显示当前敞口，不调任何参数。
+            # v8.7 修复：置 apply=False——旧版 main 仍会 apply_risk_adjustments，
+            # 把 risk_config.json 覆盖成默认风控，抹掉用户既有配置。
             adjustments['metrics'] = {
                 '总交易': real_count,
                 '总成交额': f'{total_amount:,.0f}',
@@ -442,6 +450,7 @@ def analyze_risk_adjustments(cold_start_data=None):
                 '胜率': '待积累卖出记录',
                 '数据来源': adjustments['data_source'],
             }
+            adjustments['apply'] = False
             return adjustments
 
         # 有平仓 → 算真实统计
@@ -602,6 +611,8 @@ def analyze_risk_adjustments(cold_start_data=None):
         if not cold_start_data:
             adjustments['warnings'].append('冷启动数据也未生成，请运行 enhanced_backtest.py 生成')
         adjustments['data_source'] = '无'
+        # v8.7 修复：没有任何样本时也不得把默认风控写回 risk_config.json（防覆盖用户配置）
+        adjustments['apply'] = False
         return adjustments
 
     # Real trades available — use them
@@ -892,9 +903,12 @@ def main():
         print("  No adjustments needed")
     print(f"  Data source: {adjustments.get('data_source', '未知')}")
 
-    # 4. 应用调整并生成报告
+    # 4. 应用调整并生成报告（v8.7：尊重 apply=False，避免无平仓时重置风控配置）
     print("\n[4/5] Applying adjustments & generating report...")
-    apply_risk_adjustments(adjustments)
+    if adjustments.get('apply', True):
+        apply_risk_adjustments(adjustments)
+    else:
+        print("  Skipped apply (adjustments.apply=False) — 保留现有 risk_config.json")
     generate_feedback_report(analysis_df, adjustments)
 
     print(f"\n[OK] Feedback loop complete")

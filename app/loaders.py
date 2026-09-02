@@ -1,7 +1,5 @@
-import os, glob, re, subprocess, shlex, sys, json
-from datetime import datetime, timedelta, date
+import os, glob, re, subprocess, shlex, sys
 import pandas as pd
-import numpy as np
 import streamlit as st
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -264,5 +262,5 @@ def load_current_prices():
     price = pd.to_numeric(df.get('最新价', pd.Series(0, index=df.index)), errors='coerce').fillna(0.0)
     return {
         code: {'name': str(n), 'price': float(p)}
-        for code, n, p in zip(df['_code'], name, price)
+        for code, n, p in zip(df['_code'], name, price, strict=True)
     }

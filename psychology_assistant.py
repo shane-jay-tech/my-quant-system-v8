@@ -237,7 +237,7 @@ def generate_psychology_diary(state):
 
     # 新手保护期心理提示（v2: 区分主动/被动升级）
     try:
-        from newbie_protection import get_phase_psychology_tip, init_newbie_status, check_readiness
+        from newbie_protection import get_phase_psychology_tip, init_newbie_status
         newbie_status = init_newbie_status()
         tip = get_phase_psychology_tip()
         upgrade_type = newbie_status.get('upgrade_type', '')

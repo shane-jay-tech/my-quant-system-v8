@@ -2,7 +2,7 @@
 系统综合自检 + 健康报告生成（版本号从 SYSTEM_VERSION 单一事实源拉取）
 输出: reports/health_check_YYYYMMDD.md，含周趋势对比
 """
-import os, sys, json, glob, importlib
+import os, sys, json, glob, importlib, re
 from datetime import datetime, timedelta, date
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -118,7 +118,8 @@ v85_new = ['portfolio_manager.py', 'data_validator.py', 'archive_old_data.py',
            'benchmark_comparison.py', 'tracking_error_report.py', 'smoke_tests.py']
 v86_new = ['fetch_etf_data.py']
 # v8.7 预备：LLM 融合层（交付层 digest/replay/channels + shadow 分析师 + 统一 LLM 通道）
-v87_new = ['digest.py', 'decision_replay.py', 'llm_analyst.py', 'core/llm.py', 'bark_sender/channels.py']
+v87_new = ['digest.py', 'decision_replay.py', 'llm_analyst.py', 'core/llm.py', 'bark_sender/channels.py',
+           'utils/trading_calendar.py']
 config_files = ['daily_pipeline.bat', 'morning_pipeline.bat', 'weekly_health_check.bat',
                 'run.bat', 'start-bg.bat', 'launcher.pyw', 'app.py', 'CLAUDE.md', 'AGENTS.md',
                 'requirements.txt', 'core/config.py', 'real_trades.csv',

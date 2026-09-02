@@ -35,7 +35,7 @@ ALLOWED_ADJUSTMENTS = {
     'MAX_SINGLE_POSITION': {'delta': 0.05, 'min': 0.10, 'max': 0.25},
 }
 
-IMPROVEMENT_THRESHOLD = 0.3  # 平均收益提升>0.3%才采纳
+IMPROVEMENT_THRESHOLD = 0.20  # 启发式评分 ≥0.20 才建议/采纳（v8.7 修复：旧代码再 /100 成 0.003，门槛形同虚设）
 ROLLING_DAYS = 5
 SAFETY_MAX_CONSECUTIVE_DEGRADE = 3
 SAFETY_MAX_DRAWDOWN_INCREASE = 1.0  # 最大回撤累计增加1%
@@ -263,8 +263,8 @@ def apply_adjustment(best_adj, state):
     new_val = best_adj['new']
     improvement = best_adj['estimated_improvement']
 
-    if improvement < IMPROVEMENT_THRESHOLD / 100:
-        return False, f"improvement {improvement:.4f} < threshold {IMPROVEMENT_THRESHOLD/100:.4f}"
+    if improvement < IMPROVEMENT_THRESHOLD:
+        return False, f"improvement {improvement:.4f} < threshold {IMPROVEMENT_THRESHOLD:.4f}"
 
     # v8 dry-run: 写 suggested_params 而非 current_params
     if DRY_RUN_ONLY:
@@ -448,14 +448,14 @@ def generate_report(state, best_adj, success, reason):
             f"| 排名 | 参数 | 当前 | 建议 | 评分 | 过阈 |",
             f"|------|------|------|------|------|------|",
         ])
-        threshold_dec = IMPROVEMENT_THRESHOLD / 100
+        threshold_dec = IMPROVEMENT_THRESHOLD
         for i, c in enumerate(all_candidates[:5], 1):
             pass_mark = '✅' if c['estimated_improvement'] >= threshold_dec else '❌'
             lines.append(f"| {i} | {c['param']} | {c['old']} | {c['new']} | {c['estimated_improvement']:+.4f} | {pass_mark} |")
         lines.extend([
             f"",
             f"> 注：评分是启发式得分（基于 win_rate / net_return 的方向偏好），不是真实回测收益。"
-            f"阈值 {threshold_dec:.4f}（即配置项 IMPROVEMENT_THRESHOLD={IMPROVEMENT_THRESHOLD}/100）。",
+            f"阈值 {threshold_dec:.2f}（即配置项 IMPROVEMENT_THRESHOLD={IMPROVEMENT_THRESHOLD}）。",
             f"",
             f"**最佳候选**：{best_adj['param']} {best_adj['old']}→{best_adj['new']}  "
             f"(评分 {best_adj['estimated_improvement']:+.4f}, 阈值 ≥{threshold_dec:.4f})",

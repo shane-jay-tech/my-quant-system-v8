@@ -70,7 +70,7 @@ def load_stock_data():
     return stock_map
 
 
-def compliance_check(orders, stock_data, total_capital=100000):
+def compliance_check(orders, stock_data, total_capital=None):
     """
     合规检查，返回 (passed_orders, warnings, errors)
 
@@ -81,6 +81,9 @@ def compliance_check(orders, stock_data, total_capital=100000):
     - 非跌停股（跌停无法卖出）
     - 最小委托金额
     """
+    # v8.7 修复：默认本金不再写死 10 万
+    if total_capital is None:
+        total_capital = float(cfg_get('sim.initial_capital', 2400))
     passed = []
     warnings = []
     errors = []
@@ -314,7 +317,8 @@ def main():
         return 1
 
     orders = order_data.get('订单', [])
-    capital = order_data.get('资金分配', {}).get('总资金', 100000)
+    # v8.7 修复：订单缺资金字段时回退系统本金，不再默认 10 万
+    capital = order_data.get('资金分配', {}).get('总资金', cfg_get('sim.initial_capital', 2400))
     print(f"[1/4] Loaded {len(orders)} orders | Capital: {capital:,.0f}")
 
     # 2. 加载行情做合规检查

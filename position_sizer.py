@@ -8,10 +8,10 @@
 4. ATR动态止损
 5. 输出每日订单文件 orders/daily_orders_YYYYMMDD.json
 """
-import os, sys, json, math
+import os, sys, json
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 from sector_classifier import classify_sector, apply_sector_cap
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -887,27 +887,27 @@ def load_latest_picks():
         print(f"[SIZER] Loaded {len(df)} picks from multi_vote (3-strategy consensus)")
         return df
 
-    # 2. 回退：从strategy markdown报告解析
-    sf = sorted([f for f in os.listdir(RESULTS_DIR) if f.startswith('strategy_')], reverse=True)
-    if sf:
-        import re
-        with open(os.path.join(RESULTS_DIR, sf[0]), 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        picks = []
-        for m in re.finditer(r'\|\s*(\d{6})\s*\|\s*([^|]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|', content):
-            picks.append({
-                '代码': m.group(1),
-                '名称': m.group(2).strip(),
-                '收盘': float(m.group(3)),
-                'momentum': 0.5,
-            })
-
+    # 2. 回退：从最新 pick_*.md 选股报告解析
+    # v8.7 修复：旧代码找 strategy_*.md（strategy.py 实际写的是 pick_*.md）且正则是 13 列老格式，
+    # 对 14 列新表头命中 0 —— 回退永远失效并落入"全市场前 N 只"的危险兜底。
+    import glob as _glob
+    pick_files = sorted(_glob.glob(os.path.join(RESULTS_DIR, 'pick_*.md')), reverse=True)
+    if pick_files:
+        try:
+            from bark_sender.parsers import parse_report_full
+            _, rows = parse_report_full(pick_files[0])
+        except Exception as exc:
+            print(f"[SIZER] pick report parse failed: {exc}")
+            rows = []
+        picks = [{'代码': r['code'], '名称': r['name'],
+                  '收盘': float(r['price']) if r.get('price') not in (None, '') else 0.0,
+                  'momentum': 0.5}
+                 for r in rows if r.get('code') and r.get('price') not in (None, '')]
         if picks:
             df = pd.DataFrame(picks)
             if '名称' in df.columns:
                 df = df[~df['名称'].str.contains(r'\*?ST', na=False, regex=True)]
-            print(f"[SIZER] Loaded {len(df)} picks from strategy report (fallback)")
+            print(f"[SIZER] Loaded {len(df)} picks from pick report (fallback)")
             return df
 
     # 3. 最终fallback: 读data目录下最新的stock csv
@@ -990,7 +990,7 @@ def main():
 
     # 4. 输出订单文件
     print("\n[4/4] Generating order files...")
-    path = generate_order_file(orders, summary, info)
+    _ = generate_order_file(orders, summary, info)  # 返回路径暂未使用，保留生成副作用
 
     # 打印摘要
     print(f"\n[OK] Position sizing complete")

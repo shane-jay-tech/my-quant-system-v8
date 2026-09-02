@@ -62,9 +62,25 @@ def save_state(state):
 
 
 def get_held_codes():
-    """快速获取当前持仓代码集合（供 position_sizer exclude 用）。"""
+    """快速获取当前持仓代码集合（供 position_sizer exclude 用）。
+
+    v8.7 审查修复：把 sim_results/account_state.json 的实际持仓也并入排除集合——
+    之前 portfolio_state（理论）与 sim 账户（实际）两套真相源分叉时，实际持仓可能被重复推荐。
+    """
     state = load_state()
-    return {p['代码'] for p in state.get('positions', [])}
+    codes = {str(p.get('代码', '')).zfill(6) for p in state.get('positions', []) if p.get('代码')}
+    sim_path = os.path.join(BASE_DIR, 'sim_results', 'account_state.json')
+    if os.path.exists(sim_path):
+        try:
+            with open(sim_path, 'r', encoding='utf-8') as f:
+                sim = json.load(f)
+            for p in sim.get('positions', []):
+                code = str(p.get('code', '')).zfill(6)
+                if code:
+                    codes.add(code)
+        except Exception:
+            pass
+    return codes
 
 
 def add_positions_from_orders(orders):
@@ -131,10 +147,19 @@ def remove_position(code, exit_price, exit_reason):
 
 
 def increment_holding_days():
-    """每个交易日开始时调用一次，把所有持仓的'持有日数' +1。"""
+    """每个交易日开始时调用一次，把所有持仓的'持有日数' +1。
+
+    v8.7 审查修复：用独立的 last_hold_increment_date 做幂等（旧版每次 sync_daily
+    都 +1，中断重跑会让持有日数翻倍；复用 as_of 又会被 add/remove 的 save_state 干扰）。
+    """
     state = load_state()
+    today = _today_str()
+    if state.get('last_hold_increment_date') == today:
+        print("[PORTFOLIO] already incremented today (last_hold_increment_date == today); skip")
+        return 0
     for p in state['positions']:
         p['持有日数'] = p.get('持有日数', 0) + 1
+    state['last_hold_increment_date'] = today
     save_state(state)
     return len(state['positions'])
 

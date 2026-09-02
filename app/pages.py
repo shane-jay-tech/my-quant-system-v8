@@ -905,7 +905,6 @@ def render_cost_dashboard_page():
     try:
         from cost_tracker import get_cost_summary, load_cost_logs, PIPELINE_STEPS_LOCAL, PIPELINE_STEPS_LLM
         summary = get_cost_summary()
-        logs_df = load_cost_logs(days=30)
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -915,8 +914,9 @@ def render_cost_dashboard_page():
             st.metric("本月LLM成本", f"CNY {summary['month_cost']:.4f}",
                      delta=f"{summary['month_calls']}次调用")
         with col3:
-            st.metric("本地计算节省", f"CNY {summary['month_cost']*3:.4f}",
-                     delta=f"{summary['local_steps']}步本地运行")
+            # v8.7 修复：不再用"本地计算节省=月成本×3"这种无推导依据的数字误导用户
+            st.metric("本地执行步骤", f"{summary['local_steps']}步",
+                     help="按流水线估算的本地步骤数（参考值，不是省了多少钱）")
 
         st.divider()
         st.subheader("📈 本月成本曲线")
@@ -1167,6 +1167,13 @@ def render_my_trades_page():
                 result = append_trade(date_str, code_clean, name_input.strip(),
                                      direction_input, price_input, qty_input,
                                      reason_input.strip(), note_input.strip())
+                # v8.7 修复：录入后立即重算今日行为日志——旧版只靠 15:37 流水线记录一次，
+                # 收盘后补录成交永远留在"未操作"分类里。
+                try:
+                    import behavior_log
+                    behavior_log.log_today()
+                except Exception as be:
+                    print(f"[BEHAVIOR] re-log after trade failed (non-fatal): {be}")
                 st.success(f"✅ 交易已录入！{result}")
                 st.balloons()
                 # Clear session state

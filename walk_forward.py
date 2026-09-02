@@ -150,7 +150,10 @@ def walk_forward(hist_df, today_df, index_df):
     for i, (train_dates, test_dates) in enumerate(windows):
         print(f'\n[WF] Window {i+1}/{len(windows)}: train {len(train_dates)}d, test {len(test_dates)}d')
         train_hist = hist_df[hist_df['日期'].isin(train_dates)]
-        test_hist = hist_df[hist_df['日期'].isin(test_dates)]
+        # v8.7 修复：测试集指标必须有训练期预热——旧版只传 test_hist，
+        # MA_long 在测试窗口内从头滚动，前 ma_long-1 天全是 NaN，样本外验证名存实亡。
+        # 取"截至测试期末"的全量历史：不含任何未来数据，又能让 MA/RSI 在测试首日已就绪。
+        test_hist = hist_df[hist_df['日期'] <= test_dates[-1]]
 
         # 网格搜索
         best_params = None

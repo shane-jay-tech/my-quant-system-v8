@@ -215,7 +215,6 @@ def analyze_position(pos, prices, history_df, risk_config):
     take_profit = pos.get('take_profit', round(entry_price * (1 + float(rules['take_profit_pct'])), 2))
 
     max_hold = int(rules['max_hold_days'])
-    stop_pct = rules['stop_loss_pct']
 
     result = {
         'code': code,

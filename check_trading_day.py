@@ -46,7 +46,7 @@ def is_trading_day(today: date | None = None, request_get=None):
         'Connection': 'close',
     }
 
-    for attempt in range(3):
+    for _ in range(3):
         try:
             resp = get(url, headers=headers, timeout=10)
             if resp.status_code != 200:
@@ -87,15 +87,27 @@ def is_trading_day(today: date | None = None, request_get=None):
                 # 行情日期是昨天但今天是工作日 → 今天可能是交易日（还没开盘）
                 return True, f"最新行情={data_date}(-{day_diff}天), 工作日→假设交易日"
             elif data_date == prev_weekday_str and volume > 0:
-                # 周一拿到上周五行情：day_diff=3 是普通周末，不是长假
-                return True, f"最新行情={data_date}(上一工作日), 工作日→假设交易日"
+                # 周一拿到上周五行情：day_diff=3 既可能是普通周末，也可能是节假日周一。
+                # v8.7 修复：优先问本地交易日历；日历不可用才退回旧 fail-open 假设。
+                try:
+                    import os as _os
+                    from utils.trading_calendar import is_trading_day_by_calendar
+                    _cal = is_trading_day_by_calendar(today, _os.path.join(
+                        _os.path.dirname(_os.path.abspath(__file__)), 'data'))
+                    if _cal is False:
+                        return False, f"最新行情={data_date}(上一工作日), 交易日历确认：节假日"
+                    if _cal is True:
+                        return True, f"最新行情={data_date}(上一工作日), 交易日历确认：交易日"
+                except Exception:
+                    pass
+                return True, f"最新行情={data_date}(上一工作日), 日历不可用→保守假设交易日"
             elif day_diff >= 3:
                 # 上一工作日之后仍无更新（如周二仍停留在周五）→ 很可能遇到假日
                 return False, f"最新行情={data_date}(-{day_diff}天), 数据过期→可能长假"
             elif data_date != today_str and volume == 0:
                 return False, f"行情日期={data_date}, 成交量为0"
 
-        except Exception as e:
+        except Exception:
             time.sleep(1)
             continue
 
