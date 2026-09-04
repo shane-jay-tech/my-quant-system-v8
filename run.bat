@@ -3,7 +3,7 @@ cd /d "%~dp0"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
-:: Kill old process on port 8502
+REM Kill old process on port 8502
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8502" ^| findstr "LISTENING"') do (
     taskkill /f /pid %%a >nul 2>&1
 )
