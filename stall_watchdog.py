@@ -54,7 +54,18 @@ def main():
 
     log_date = _latest_date("logs/pipeline_*.log")
     orders_date = _latest_date("orders/daily_orders_*.json")
-    ref_date = _latest_date("data/stock_*.csv")
+    stock_date = _latest_date("data/stock_*.csv")
+
+    # 参照日 = max(最新 stock csv 日, ≤今天的最近一个工作日)。
+    # 幽灵文件归档后 stock 日可能早于最后活动日，反向窗口会漏报；
+    # 参照日永不早于活动日即可保证停摆可检出。
+    today = date.today()
+    recent_weekday = today
+    if recent_weekday.weekday() >= 5:  # 周六/周日回退到周五
+        recent_weekday -= timedelta(days=recent_weekday.weekday() - 4)
+    ref_date = stock_date
+    if not ref_date or parse_yyyymmdd(recent_weekday.isoformat().replace("-", "")) > parse_yyyymmdd(ref_date):
+        ref_date = recent_weekday.isoformat().replace("-", "")
 
     if not ref_date:
         print("[watchdog] no data/stock_*.csv found, cannot determine reference trading day")
@@ -70,7 +81,7 @@ def main():
 
     print("[watchdog] latest pipeline log : %s" % log_date)
     print("[watchdog] latest orders file  : %s" % orders_date)
-    print("[watchdog] reference trade day : %s (max data/stock_*.csv)" % ref_date)
+    print("[watchdog] reference trade day : %s (max(stock csv, recent weekday))" % ref_date)
     print("[watchdog] last activity       : %s" % activity)
     print("[watchdog] lag                 : %d trading days (threshold %d)" % (lag, args.threshold))
     print("[watchdog] verdict             : %s" % ("STALL" if stalled else "OK"))
