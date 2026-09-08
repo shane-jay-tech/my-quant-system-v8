@@ -16,6 +16,42 @@ from datetime import date, timedelta
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+
+# ---------------------------------------------------------------------------
+# 内置中国法定节假日表（工作日落假日，MM-DD 按年分组）。
+# 方向性约定：**宁可少标不可多标**——少标一天假日=lag 多算一天=误报方向（符合
+# e06f「宁可误报不漏报」）；多标则可能漏报真实停摆。
+# 2025：已对官方安排核实（verified）。2026/2027：仅内置高置信法定节日正日推算
+# （verified=False，未对官方文件逐条核对，精确清单日间可从 akshare 刷新）。
+# 表外年份自动退化为 Mon-Fri 近似（本文件原行为）。
+# ---------------------------------------------------------------------------
+HOLIDAY_SETS = {
+    2025: ({"01-01", "01-28", "01-29", "01-30", "01-31", "02-03", "02-04",
+            "04-04", "05-01", "05-02", "05-05", "06-02",
+            "10-01", "10-02", "10-03", "10-06", "10-07", "10-08"}, True),
+    2026: ({"01-01", "01-02", "02-16", "02-17", "02-18", "02-19", "02-20",
+            "04-06", "05-01", "06-19", "09-25",
+            "10-01", "10-02", "10-05", "10-06", "10-07"}, False),
+    2027: ({"01-01"}, False),
+}
+
+
+def _is_holiday(d: date) -> bool:
+    entry = HOLIDAY_SETS.get(d.year)
+    if not entry:
+        return False
+    md, _verified = entry
+    return d.strftime("%m-%d") in md
+
+
+def _is_trading(d: date, cal) -> bool:
+    """trading_calendar 可用（非 None）时以真实日历为准；否则工作日-内置节假日。"""
+    if cal is not None:
+        return d.isoformat() in cal
+    return d.weekday() < 5 and not _is_holiday(d)
+
 
 
 def _latest_date(pattern):
@@ -31,14 +67,15 @@ def parse_yyyymmdd(s):
     return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
 
 
-def weekdays_between(start_exclusive, end_inclusive):
-    """Count Mon-Fri dates in (start, end]. Reversed window yields 0."""
+def weekdays_between(start_exclusive, end_inclusive, cal=None):
+    """统计 (start, end] 内的交易日。cal 为交易日集合（'YYYY-MM-DD'）时按真实
+    日历计数；None 时退化为工作日-内置节假日近似（原行为）。反向窗口 yield 0。"""
     if end_inclusive <= start_exclusive:
         return 0
     count = 0
     d = start_exclusive + timedelta(days=1)
     while d <= end_inclusive:
-        if d.weekday() < 5:
+        if _is_trading(d, cal):
             count += 1
         d += timedelta(days=1)
     return count
@@ -56,13 +93,22 @@ def main():
     orders_date = _latest_date("orders/daily_orders_*.json")
     stock_date = _latest_date("data/stock_*.csv")
 
-    # 参照日 = max(最新 stock csv 日, ≤今天的最近一个工作日)。
+    # 参照日 = max(最新 stock csv 日, ≤今天的最近一个交易日)。
     # 幽灵文件归档后 stock 日可能早于最后活动日，反向窗口会漏报；
     # 参照日永不早于活动日即可保证停摆可检出。
+    # wt7（2026-09-09）：交易日判定接入 utils.trading_calendar（缓存/akshare），
+    # 不可用时退化为工作日-内置节假日表（HOLIDAY_SETS），再退化 Mon-Fri 近似。
+    cal = None
+    try:
+        from utils.trading_calendar import get_trading_days
+        cal = get_trading_days(str(BASE / "data"))
+    except Exception as _cal_exc:
+        print("[watchdog] calendar unavailable (%s), fallback to builtin table" % _cal_exc)
+
     today = date.today()
     recent_weekday = today
-    if recent_weekday.weekday() >= 5:  # 周六/周日回退到周五
-        recent_weekday -= timedelta(days=recent_weekday.weekday() - 4)
+    while not _is_trading(recent_weekday, cal):
+        recent_weekday -= timedelta(days=1)
     ref_date = stock_date
     if not ref_date or parse_yyyymmdd(recent_weekday.isoformat().replace("-", "")) > parse_yyyymmdd(ref_date):
         ref_date = recent_weekday.isoformat().replace("-", "")
