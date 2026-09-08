@@ -94,7 +94,7 @@ def test_smoke_covers_v87_modules():
 
 def test_auto_heal_calls_script_by_name_not_command_string():
     src = (BASE_DIR / 'auto_heal.py').read_text(encoding='utf-8')
-    assert src.count('run_script(\'_self_check.py\', timeout=60)') == 2
+    assert src.count('run_script(\'ops/health.py\', timeout=60)') == 2  # S2 迁移：_self_check.py → ops/health.py
     assert "run_script(f'python" not in src  # 不再把整个命令字符串当文件名
 
 

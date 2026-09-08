@@ -415,6 +415,6 @@ def test_pipeline_hybrid_layer_order():
 
 
 def test_self_check_lists_v87_files():
-    src = (BASE_DIR / '_self_check.py').read_text(encoding='utf-8')
+    src = (BASE_DIR / 'ops' / 'health.py').read_text(encoding='utf-8')  # S2 迁移：_self_check.py → ops/health.py
     assert 'v87_new' in src and 'core/llm.py' in src and 'bark_sender/channels.py' in src
     assert 'v86_new + v87_new' in src

@@ -12,7 +12,7 @@ echo [%date% %time%] === Weekly Health Check Start === >> "%LOGFILE%" 2>&1
 cd /d "%BASE%"
 
 echo [1] Running self check >> "%LOGFILE%" 2>&1
-"%PYTHON%" _self_check.py >> "%LOGFILE%" 2>&1
+"%PYTHON%" ops\health.py >> "%LOGFILE%" 2>&1
 if %errorlevel% neq 0 echo [WARN] _self_check.py exited with code %errorlevel% >> "%LOGFILE%"
 
 echo [2] Running auto-heal >> "%LOGFILE%" 2>&1

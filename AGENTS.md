@@ -214,7 +214,7 @@
 | 成本审计 | `cost_tracker.py` | LLM调用成本追踪+每日审计报告+仪表盘看板 |
 | 新手保护期 | `newbie_protection.py` | 3阶段保护(观察/模拟/预备)，自动阶段推进 |
 | 轻量进化 | `evolve_daily_light.py` | 每日参数微调(RSI±5/MA±2/仓位±5%)+安全锁 |
-| 自检自愈 | `_self_check.py` + `auto_heal.py` | 每日管道结束后 147 项自检→自动修复→日志记录 |
+| 自检自愈 | `ops/health.py`（原 _self_check.py）+ `auto_heal.py` | 每日管道结束后 147 项自检→自动修复→日志记录 |
 | 首周手册 | `learning/first_week_guide.md` | 新手10天从观察到实盘的完整路径 |
 | 出场顾问 | `exit_advisor.py` | 5级出场条件(止损/止盈/到期/死叉/弱势)每日检查所有持仓 |
 | 选股追踪 | `track_performance.py` | 追踪每日选股次日表现，积累准确率数据 |
@@ -407,7 +407,7 @@ sim_trade.py 每周自动比对 real_trades.csv 与系统推荐订单：
 ## 自动化保障
 
 - Windows Task Scheduler:
-  - 每个交易日 **09:15** 触发 `morning_pipeline.bat`（盘前情绪评分+推送；**该任务需手动注册**，注册命令见 `_self_check.py` 的 morning task 提示）
+  - 每个交易日 **09:15** 触发 `morning_pipeline.bat`（盘前情绪评分+推送；**该任务需手动注册**，注册命令见 `ops/health.py` 的 morning task 提示）
   - 每个交易日 **15:37** 触发 `daily_pipeline.bat`（日终流水线，实际任务名为 QuantDailyPipeline_v5）
 - 24步日终流水线（0-24）：数据→数据层(基本面)→选股(含基本面过滤)→多策略→回测(分档成本)→因子分析(周一)→分钟K线→仓位→模拟交易→组合风控→反馈闭环→研究→追踪→内化→心理→新手指令卡→推送→自检自愈→Walk-Forward(周三)→蒙特卡洛(月末)→策略竞技(周五)→每周任务
 - 3步盘前流水线：交易日检测→情绪评分→仓位建议推送

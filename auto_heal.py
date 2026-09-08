@@ -295,7 +295,7 @@ def run_heal(json_path=None):
     # 1. 先运行自检（如果没有 JSON 文件）
     if not os.path.exists(json_path):
         log('INFO', 'No self-check JSON found, running _self_check.py...')
-        run_script('_self_check.py', timeout=60)
+        run_script('ops/health.py', timeout=60)
         time.sleep(1)
 
     # 2. 加载自检结果
@@ -344,7 +344,7 @@ def run_heal(json_path=None):
 
     # 4. 修复后重新自检
     print(f"\n  --- Post-Repair Verification ---")
-    run_script('_self_check.py', timeout=60)
+    run_script('ops/health.py', timeout=60)
     time.sleep(1)
 
     # 5. 读取修复后结果

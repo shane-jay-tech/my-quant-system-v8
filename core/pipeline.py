@@ -73,7 +73,7 @@ PIPELINE_STEPS = {
     "digest":              {"script": "digest.py",                "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "开盘前简报",        "unlock_hint": "始终启用（无 LLM key 走规则兜底）"},
     "decision_replay":     {"script": "decision_replay.py",       "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "决策回放 HTML",     "unlock_hint": "始终启用（纯本地，零成本）"},
     "bark_push":           {"script": "send_to_bark.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "Bark 推送",         "unlock_hint": "始终启用"},
-    "self_check":          {"script": "_self_check.py",           "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "系统自检",          "unlock_hint": "始终启用"},
+    "self_check":          {"script": "ops/health.py",           "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily",                          "label": "系统自检",          "unlock_hint": "始终启用"},
     # v8.7 审查修复：goal_metrics 移到 self_check 之后——它读 system_self_check 报告，
     # 旧顺序会让当日自检结果永远进不了当日目标指标。
     "goal_metrics":        {"script": "goal_metrics.py",          "tiers": ["beginner", "advanced", "pro", "auto"], "schedule": "daily", "always_on": True,       "label": "目标指标",          "unlock_hint": "始终启用（流水线成功率/数据完整率/自检通过率）"},
