@@ -7,8 +7,11 @@ import os
 import re
 import sys
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CLAUDE_MD = os.path.join(BASE_DIR, 'CLAUDE.md')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.paths import REPO_ROOT
+
+CLAUDE_MD = REPO_ROOT / 'CLAUDE.md'
 
 
 def split_kb_section(content):
