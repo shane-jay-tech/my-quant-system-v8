@@ -32,7 +32,8 @@ import time
 
 import requests
 
-from .config import BARK_TOKENS, _SECRETS_PATH
+from core.secrets import get_secret_object
+from .config import BARK_TOKENS, _SECRETS_PATH  # noqa: F401 _SECRETS_PATH 为既有测试接缝
 
 
 class Channel(abc.ABC):
@@ -139,15 +140,10 @@ class FeishuChannel(Channel):
 # ============================================================
 def load_channel_config() -> dict[str, dict]:
     cfg: dict[str, dict] = {}
-    if os.path.exists(_SECRETS_PATH):
-        try:
-            with open(_SECRETS_PATH, 'r', encoding='utf-8') as f:
-                sec = json.load(f)
-            nc = sec.get('notify_channels') or {}
-            if isinstance(nc, dict):
-                cfg.update({k: (v or {}) for k, v in nc.items() if isinstance(v, dict)})
-        except Exception as exc:
-            print(f"[NOTIFY] secrets.json 解析失败，忽略 notify_channels: {exc}", flush=True)
+    nc = get_secret_object('NOTIFY_CHANNELS')
+    for k, v in nc.items():
+        if isinstance(v, dict):
+            cfg[k] = v or {}
     if url := os.environ.get('QUANT_NOTIFY_WEBHOOK_URL'):
         cfg['webhook#env'] = {'url': url}
     if wh := os.environ.get('QUANT_FEISHU_WEBHOOK'):

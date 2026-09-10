@@ -51,6 +51,8 @@ _REGISTRY: dict[str, SecretSpec] = {
         SecretSpec('GPT_API_KEY', 'GPT_API_KEY', 'env or .env.local'),
         SecretSpec('BARK_URL', 'BARK_URL', 'env / .env.local / data/secrets.json:bark_url'),
         SecretSpec('BARK_KEY', 'BARK_KEY', 'env / .env.local / data/secrets.json:bark_token'),
+        SecretSpec('BARK_TOKENS', 'BARK_TOKENS', 'env / data/secrets.json:bark_tokens（列表）'),
+        SecretSpec('NOTIFY_CHANNELS', 'NOTIFY_CHANNELS', 'data/secrets.json:notify_channels（对象）'),
     )
 }
 
@@ -60,6 +62,8 @@ _JSON_KEY_ALIASES: dict[str, str] = {
     'GPT_API_KEY': 'gpt_api_key',
     'BARK_URL': 'bark_url',
     'BARK_KEY': 'bark_token',
+    'BARK_TOKENS': 'bark_tokens',
+    'NOTIFY_CHANNELS': 'notify_channels',
 }
 
 
@@ -131,6 +135,32 @@ def get_secret(name: str, *, required: bool = False) -> str | None:
     if required:
         raise MissingSecretError(name)
     return None
+
+
+def get_secret_list(name: str) -> list[str]:
+    """列表型凭据（如 bark_tokens）。环境变量命中→单元素列表；否则取 JSON 列表。
+
+    与 get_secret 相同的解析顺序与缓存；值不落日志。
+    """
+    spec = _REGISTRY.get(name)
+    if spec:
+        env = os.environ.get(spec.env_key)
+        if env:
+            return [env]
+    jkv = _load_kv(_SECRETS_JSON_PATH, _fingerprint(_SECRETS_JSON_PATH), 'json')
+    raw = jkv.get(_JSON_KEY_ALIASES.get(name, name.lower()))
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if raw:
+        return [str(raw)]
+    return []
+
+
+def get_secret_object(name: str) -> dict:
+    """对象型配置/凭据（如 notify_channels）。仅从 JSON 占位层读取；缺失→{}。"""
+    jkv = _load_kv(_SECRETS_JSON_PATH, _fingerprint(_SECRETS_JSON_PATH), 'json')
+    raw = jkv.get(_JSON_KEY_ALIASES.get(name, name.lower()))
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def llm_available() -> bool:

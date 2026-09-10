@@ -8,30 +8,23 @@ Bark 推送模块配置（v8.7 清理版）
   且与 parsers.py 里指向项目根的同名常量冲突）
 """
 import os
-import json
+import sys
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(BASE_DIR)
-_SECRETS_PATH = os.path.join(_PROJECT_ROOT, 'data', 'secrets.json')
+_SECRETS_PATH = os.path.join(_PROJECT_ROOT, 'data', 'secrets.json')  # 既有测试接缝（本模块内部已不直接读）
+sys.path.insert(0, _PROJECT_ROOT)
 
-
-def _read_secrets() -> dict:
-    if not os.path.exists(_SECRETS_PATH):
-        return {}
-    try:
-        with open(_SECRETS_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+from core.secrets import get_secret, get_secret_list
 
 
 def _load_bark_tokens() -> list:
-    sec = _read_secrets()
-    tokens = sec.get('bark_tokens') or []
-    if isinstance(tokens, list) and tokens:
-        return [str(t) for t in tokens if t]
-    token = sec.get('bark_token', '')
+    """bark_tokens 列表优先，其次 bark_token 单值；读取统一走 core.secrets（S4-d）。"""
+    tokens = get_secret_list('BARK_TOKENS')
+    if tokens:
+        return [t for t in tokens if t]
+    token = get_secret('BARK_KEY') or ''
     if token:
         return [str(token)]
     print("[BARK] 未配置 Bark token：请在 data/secrets.json 写入 bark_tokens 列表", flush=True)

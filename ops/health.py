@@ -13,6 +13,7 @@ if _REPO_ROOT_STR not in sys.path:
     sys.path.insert(0, _REPO_ROOT_STR)
 
 from core.paths import DATA_DIR, REPO_ROOT, REPORTS_DIR, RESULTS_DIR, data_file
+from core.secrets import get_secret, get_secret_list
 
 
 
@@ -230,25 +231,21 @@ def run_all():
         except Exception as e:
             warn('Data: quality check', 'data', False, str(e)[:80])
         print('\n[6] External')
-        secrets_path = data_file('secrets.json')
-        if os.path.exists(secrets_path):
-            try:
-                with open(secrets_path, 'r', encoding='utf-8') as f:
-                    sec = json.load(f)
-                check('External: Bark token in secrets', 'external', bool(sec.get('bark_token')))
-            except Exception:
-                check('External: Bark token in secrets', 'external', False, 'secrets.json parse error')
-        else:
+        if bool(get_secret('BARK_KEY')) or bool(get_secret_list('BARK_TOKENS')):
+            check('External: Bark token in secrets', 'external', True)
+        elif not data_file('secrets.json').exists():
             hardcoded = False
             for rel in ('send_to_bark.py', 'bark_sender/push.py', 'bark_sender/config.py', 'bark_sender/channels.py'):
                 try:
                     with open(REPO_ROOT / rel, 'r', encoding='utf-8') as f:
-                        if re.search('["\\\'][0-9A-Fa-f]{32}["\\\']', f.read()):
+                        if re.search('["\'][0-9A-Fa-f]{32}["\']', f.read()):
                             hardcoded = True
                             break
                 except Exception:
                     pass
             check('External: Bark token', 'external', not hardcoded, '推送源码中仍存在 32 位硬编码 token')
+        else:
+            check('External: Bark token in secrets', 'external', False, 'secrets.json parse error or no token')
         TASK_ALIASES = {'Daily pipeline': ['QuantDailyPipeline_v5', 'QuantDailyPipeline'], 'Weekly health': ['QuantWeeklyHealthCheck']}
         for desc, aliases in TASK_ALIASES.items():
             found = False
