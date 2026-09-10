@@ -25,8 +25,8 @@ REQUEST_DELAY = (0.5, 1.0)
 MAX_RETRIES = 3
 BATCH_SAVE_INTERVAL = 50  # 每50只股票保存一次进度——避免 5 分钟跑了一半却没写盘
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
-HISTORY_FILE = os.path.join(DATA_DIR, 'history.csv')
+from core.paths import DATA_DIR  # S4-b 路径收敛：仓根/data 唯一来源
+HISTORY_FILE = DATA_DIR / 'history.csv'
 
 # 线程安全锁（写文件用）
 write_lock = Lock()
@@ -324,7 +324,7 @@ def try_em_fastpath(codes_to_fetch, latest_by_code, target_date_str, sina_snapsh
     # 写盘前先备份（保留 history.csv.bak），校验全部通过才追加
     try:
         if os.path.exists(HISTORY_FILE):
-            shutil.copy2(HISTORY_FILE, HISTORY_FILE + '.bak')
+            shutil.copy2(HISTORY_FILE, HISTORY_FILE.with_name(HISTORY_FILE.name + '.bak'))
     except Exception as e:
         print(f'[EM-FASTPATH] backup failed: {e}; fall back to Sina per-stock path')
         return None
@@ -374,12 +374,12 @@ def main():
     # Step 1: 获取需要下载的股票代码列表
     # 从当日数据中读取所有 A 股代码
     today = datetime.now().strftime('%Y%m%d')
-    today_file = os.path.join(DATA_DIR, f'stock_{today}.csv')
+    today_file = DATA_DIR / f'stock_{today}.csv'
 
     if not os.path.exists(today_file):
         # 尝试找最新的 stock_*.csv
         import glob
-        pattern = os.path.join(DATA_DIR, 'stock_*.csv')
+        pattern = str(DATA_DIR / 'stock_*.csv')
         files = sorted(glob.glob(pattern), reverse=True)
         if not files:
             print("[FATAL] No stock data file found. Run fetch_stock_data.py first.")

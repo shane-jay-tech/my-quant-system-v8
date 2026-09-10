@@ -18,17 +18,15 @@ import json
 import pandas as pd
 from datetime import datetime, date, timedelta
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-sys.path.insert(0, BASE_DIR)
+from core.paths import DATA_DIR, REPO_ROOT, REPORTS_DIR  # S4-b 路径收敛：仓根/data 唯一来源
 from core.config import get as cfg_get, SYSTEM_VERSION
 
 
 def check_stock_csv():
     """检查最新 stock_YYYYMMDD.csv"""
-    files = sorted(glob.glob(os.path.join(DATA_DIR, 'stock_*.csv')), reverse=True)
+    files = sorted(glob.glob(str(DATA_DIR / 'stock_*.csv')), reverse=True)
     if not files:
         return {'status': 'FAIL', 'reason': 'no stock_*.csv files', 'metrics': {}}
     latest = files[0]
@@ -98,7 +96,7 @@ def check_history_csv():
 
 def check_multi_vote():
     """检查最新 multi_vote_*.json 字段完整性"""
-    files = sorted(glob.glob(os.path.join(BASE_DIR, 'orders', 'multi_vote_*.json')), reverse=True)
+    files = sorted(glob.glob(str(REPO_ROOT / 'orders' / 'multi_vote_*.json')), reverse=True)
     if not files:
         return {'status': 'WARN', 'reason': 'no multi_vote files yet', 'metrics': {}}
     try:

@@ -18,13 +18,13 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-CACHE_DIR = os.path.join(DATA_DIR, 'cache')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from core.paths import DATA_DIR  # S4-b 路径收敛：仓根/data 唯一来源
+CACHE_DIR = DATA_DIR / 'cache'
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # v7.6: 统一配置中心
-sys.path.insert(0, BASE_DIR)
 from core.config import get as cfg_get
 
 # ---------- 缓存工具 ----------

@@ -29,10 +29,9 @@ import requests
 import pandas as pd
 from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-WATCHLIST_PATH = os.path.join(DATA_DIR, 'etf_watchlist.json')
-REAL_TRADES_PATH = os.path.join(BASE_DIR, 'real_trades.csv')
+from core.paths import DATA_DIR, REPO_ROOT  # S4-b 路径收敛：仓根/data 唯一来源
+WATCHLIST_PATH = DATA_DIR / 'etf_watchlist.json'
+REAL_TRADES_PATH = REPO_ROOT / 'real_trades.csv'
 
 # Sina list 批量行情接口（不限页数，一次最多 ~80 只稳）
 SINA_LIST_URL = 'https://hq.sinajs.cn/list='

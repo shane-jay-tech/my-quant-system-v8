@@ -26,8 +26,7 @@ import time
 import pandas as pd
 import requests
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
+from core.paths import DATA_DIR as DEFAULT_DATA_DIR  # S4-b 路径收敛：仓根/data 唯一来源
 INDEX_FILE = "hs300_index.csv"
 
 _SINA_URL = (

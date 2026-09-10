@@ -12,6 +12,8 @@ import sys
 import os
 from datetime import datetime
 
+from core.paths import DATA_DIR  # S4-b 路径收敛：仓根/data 唯一来源
+
 # ========== 反反爬：请求头伪装 ==========
 def get_sina_headers():
     """新浪财经专用请求头"""
@@ -362,9 +364,9 @@ def main():
     df = df.drop_duplicates(subset=['代码'], keep='first')
     df = df.sort_values('代码').reset_index(drop=True)
 
-    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+    output_dir = DATA_DIR
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f'stock_{today}.csv')
+    output_path = output_dir / f'stock_{today}.csv'
     df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
     print(f"\n{'='*50}")
