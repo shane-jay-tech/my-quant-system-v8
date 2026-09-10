@@ -13,8 +13,7 @@ import os, sys, glob, requests, time
 from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+from core.paths import DATA_DIR, RESULTS_DIR  # S4-c 路径收敛：唯一路径来源
 
 # v7.5: 统一配置中心（保留本地默认值作为 fallback）
 sys.path.insert(0, BASE_DIR)

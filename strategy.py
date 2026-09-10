@@ -32,8 +32,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # v7.6: 统一配置中心（保留本地默认值作为 fallback）
 sys.path.insert(0, BASE_DIR)
 from core.config import get as cfg_get
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+from core.paths import DATA_DIR, RESULTS_DIR  # S4-c 路径收敛：唯一路径来源
 
 # 策略参数（优先从统一配置读取）
 MA_SHORT = cfg_get('strategy.ma_short', 5)

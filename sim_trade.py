@@ -14,9 +14,8 @@ import numpy as np
 from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
-SIM_DIR = os.path.join(BASE_DIR, 'sim_results')
+from core.paths import DATA_DIR, ORDERS_DIR, REPO_ROOT  # S4-c 路径收敛：唯一路径来源
+SIM_DIR = REPO_ROOT / 'sim_results'
 
 # v7.5: 统一配置中心（保留本地默认值作为 fallback）
 sys.path.insert(0, BASE_DIR)
@@ -34,7 +33,7 @@ from cost_model import (
 
 _FALLBACK_CAPITAL = cfg_get('sim.initial_capital', 2400)
 _USE_REAL_CAPITAL = cfg_get('sim.use_real_capital', True)
-REAL_TRADES_FILE = os.path.join(BASE_DIR, 'real_trades.csv')
+REAL_TRADES_FILE = REPO_ROOT / 'real_trades.csv'
 
 
 def _cost_gate_max_pct():
@@ -760,7 +759,7 @@ def generate_sim_report():
 
 def calc_execution_quality():
     """对比真实交易与系统建议，计算滑点和纪律偏差"""
-    real_file = os.path.join(BASE_DIR, 'real_trades.csv')
+    real_file = os.path.join(BASE_DIR, 'real_trades.csv')  # BASE_DIR 为测试 monkeypatch 接缝
     if not os.path.exists(real_file):
         return None
 
@@ -775,7 +774,7 @@ def calc_execution_quality():
         return None
 
     # 加载系统订单
-    orders_dir = os.path.join(BASE_DIR, 'orders')
+    orders_dir = os.path.join(BASE_DIR, 'orders')  # BASE_DIR 为测试 monkeypatch 接缝
     order_files = sorted(
         [f for f in os.listdir(orders_dir) if f.startswith('daily_orders_') and f.endswith('.json')],
         reverse=True

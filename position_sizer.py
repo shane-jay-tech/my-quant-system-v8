@@ -15,9 +15,7 @@ from datetime import datetime, date
 from sector_classifier import classify_sector, apply_sector_cap
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-ORDERS_DIR = os.path.join(BASE_DIR, 'orders')
-RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+from core.paths import DATA_DIR, ORDERS_DIR, RESULTS_DIR, REPO_ROOT  # S4-c 路径收敛：唯一路径来源
 
 
 # v8.7: 抽到 utils/calendar.py
@@ -54,7 +52,7 @@ def _resolve_default_capital():
     Why: v8.7 sim 账户预算来自 real_trades.csv 净投入；position_sizer
     必须用同一基线生成订单，否则 sim 1709 元、orders 1200 元会错配。
     """
-    state_path = os.path.join(BASE_DIR, 'sim_results', 'account_state.json')
+    state_path = os.path.join(BASE_DIR, 'sim_results', 'account_state.json')  # BASE_DIR 为测试 monkeypatch 接缝
     if os.path.exists(state_path):
         try:
             with open(state_path, 'r', encoding='utf-8') as f:
@@ -657,7 +655,7 @@ def _load_today_exit_signals():
     Returns: list of dict（含 code/name/action/current_price/pnl_pct/reason）or []
     """
     today = datetime.now().strftime('%Y%m%d')
-    today_path = os.path.join(BASE_DIR, 'results', f'exit_advisor_{today}.json')
+    today_path = os.path.join(RESULTS_DIR, f'exit_advisor_{today}.json')  # RESULTS_DIR 为测试接缝
     if not os.path.exists(today_path):
         print(f"[SIZER] exit_advisor 今日文件不存在 ({today_path})；不合并陈旧建议")
         return []

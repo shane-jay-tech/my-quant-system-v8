@@ -17,8 +17,8 @@ import numpy as np
 from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-SIM_DIR = os.path.join(BASE_DIR, 'sim_results')
+from core.paths import DATA_DIR, REPO_ROOT  # S4-c 路径收敛：唯一路径来源
+SIM_DIR = REPO_ROOT / 'sim_results'
 
 sys.path.insert(0, BASE_DIR)
 from core.config import get as cfg_get
