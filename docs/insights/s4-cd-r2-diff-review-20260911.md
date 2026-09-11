@@ -69,3 +69,30 @@ ID: S4CD-4
 - 本记录**只读**：未改动任何代码、未跑业务脚本、未动数据库与配置。
 - 复核用的全量测试为仓内 `tests/`（437 项），未含需要联网/行情数据的长跑项。
 - 归档：`my-quant-system-v8/docs/insights/s4-cd-r2-diff-review-20260911.md`（本文件）。
+## 六、实推验证（2026-09-11 下午，用户授权）——**发现并修复一个真回归**
+
+> 用户当日授权「推」，按 A-7 建议跑真实 Bark 推送做端到端验证。
+
+**第一次实推：失败。** `send_to_bark.py --file <测试件>` 返回 `{"code":"200","msg":"token错误或者失效"}`，退出码 1。
+
+**根因（证据链）**：
+1. `bark_sender/config.py::_load_bark_tokens()` 改走 `core.secrets.get_secret_list('BARK_TOKENS')`（S4-d 引入）；
+2. `core/secrets._load_kv(..., fmt='json')` 里有一行 `kv = {str(k): str(v) for k, v in data.items()}`——**把列表值也 str() 了**，`bark_tokens: ["C291…","A499…"]` 于是变成字符串 `"['C291…', 'A499…']"`（长度 72，实测 `get_secret_list` 返回 `count=1, len=[72]`）；
+3. 这个「列表的 repr」被当作单个 token 发往 Bark → 服务端判 token 非法。
+
+**修复（最小面）**：`core/secrets.py` 新增 `_load_json_raw()`（JSON 占位层的**原始类型**读取，列表/对象保持原样），`get_secret_list` / `get_secret_object` 改走它；`get_secret` / `_load_kv` 行为不变（仍只回标量字符串）。
+
+**修复后实测**：`get_secret_list('BARK_TOKENS')` → `count=2, lens=[32,32]`（与实际两条 token 一致）。
+
+**第二次实推：成功。**
+```
+[BARK-1] HTTP 200, Response: {"code":"80000000","msg":"Success"}
+[BARK-1] Server confirms: message sent successfully
+[BARK-2] HTTP 200, Response: {"code":"80000000","msg":"Success"}
+[BARK-2] Server confirms: message sent successfully
+[PUSH] OK bark
+```
+
+**回归兜底**：`tests/test_s4a_paths_secrets.py` 新增 2 例（列表/对象保型 + 环境变量单值兜底），全仓 `437 passed, 2 xfailed` → 加用例后仍全绿。
+
+**结论更新**：第三节的 S4CD-3（解析顺序一致性）之外，本次实推抓出的 **str() 破坏列表型凭据**属 **CRITICAL 级回归**（会让夜间推送整条静默失效），已修复并实机验证。这也印证「S4-d 必须实推验证」不是套话——单测与静态审查都没抓到它。

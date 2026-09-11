@@ -76,6 +76,24 @@ def _fingerprint(path: "os.PathLike[str]") -> tuple[int, int]:
 
 
 @lru_cache(maxsize=8)
+def _load_json_raw(path: "os.PathLike[str]", fp: tuple[int, int]) -> dict:
+    """JSON 占位层的**原始类型**读取（列表/对象保持原样）。
+
+    为什么单独一个函数（2026-09-11 实推暴露的回归）：_load_kv 会把所有值 str()，
+    bark_tokens 列表因此变成字符串 "['C291…','A499…']"，被 get_secret_list 当成
+    单个 token 发给 Bark → 服务端回 "token错误或者失效"。列表/对象型配置必须走这里。
+    """
+    if fp == (-1, -1):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.loads(f.read())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@lru_cache(maxsize=8)
 def _load_kv(path: "os.PathLike[str]", fp: tuple[int, int], fmt: str) -> dict[str, str]:
     """按 (mtime_ns, size) 指纹缓存的键值读取；文件缺失/损坏 → 空表。
 
@@ -147,7 +165,7 @@ def get_secret_list(name: str) -> list[str]:
         env = os.environ.get(spec.env_key)
         if env:
             return [env]
-    jkv = _load_kv(_SECRETS_JSON_PATH, _fingerprint(_SECRETS_JSON_PATH), 'json')
+    jkv = _load_json_raw(_SECRETS_JSON_PATH, _fingerprint(_SECRETS_JSON_PATH))
     raw = jkv.get(_JSON_KEY_ALIASES.get(name, name.lower()))
     if isinstance(raw, list):
         return [str(x) for x in raw]
@@ -158,7 +176,7 @@ def get_secret_list(name: str) -> list[str]:
 
 def get_secret_object(name: str) -> dict:
     """对象型配置/凭据（如 notify_channels）。仅从 JSON 占位层读取；缺失→{}。"""
-    jkv = _load_kv(_SECRETS_JSON_PATH, _fingerprint(_SECRETS_JSON_PATH), 'json')
+    jkv = _load_json_raw(_SECRETS_JSON_PATH, _fingerprint(_SECRETS_JSON_PATH))
     raw = jkv.get(_JSON_KEY_ALIASES.get(name, name.lower()))
     return dict(raw) if isinstance(raw, dict) else {}
 

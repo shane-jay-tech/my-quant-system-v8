@@ -111,3 +111,45 @@ def test_registry_names_resolvable_shape():
 
 def test_llm_available_returns_bool():
     assert llm_available() in (True, False)
+
+# ---------- S4-d 回归：列表/对象型占位配置不得被 str() 破坏（2026-09-11 实推暴露） ----------
+
+def test_secret_list_and_object_keep_types(tmp_path, monkeypatch):
+    """实推事故回归：bark_tokens 列表曾被 _load_kv 的 str() 变成 "['a','b']" 当成单个 token。
+
+    现象：Bark 服务端回「token错误或者失效」；根因是 JSON 占位层读成了字符串。
+    本测试用假值（dummy），不读真实凭据。
+    """
+    import json as _json
+
+    from core import secrets as sec
+
+    fake = tmp_path / "secrets.json"
+    fake.write_text(_json.dumps({
+        "bark_tokens": ["dummy-aaa", "dummy-bbb"],
+        "bark_token": "dummy-single",
+        "notify_channels": {"webhook#x": {"url": "https://example.invalid/hook"}},
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(sec, "_SECRETS_JSON_PATH", fake)
+    monkeypatch.setattr(sec, "_ENV_LOCAL_PATH", tmp_path / "no-env.local")
+    monkeypatch.delenv("BARK_TOKENS", raising=False)
+    monkeypatch.delenv("BARK_KEY", raising=False)
+    monkeypatch.delenv("NOTIFY_CHANNELS", raising=False)
+
+    tokens = sec.get_secret_list("BARK_TOKENS")
+    assert tokens == ["dummy-aaa", "dummy-bbb"]
+    assert all("[" not in t and "'" not in t for t in tokens), "不允许返回列表的字符串表示"
+    assert sec.get_secret("BARK_KEY") == "dummy-single"
+    channels = sec.get_secret_object("NOTIFY_CHANNELS")
+    assert channels == {"webhook#x": {"url": "https://example.invalid/hook"}}
+    assert sec.get_secret_object("NOTIFY_CHANNELS_MISSING") == {}
+
+
+def test_secret_list_env_single_value(tmp_path, monkeypatch):
+    """环境变量层命中时，列表型凭据返回单元素列表。"""
+    from core import secrets as sec
+
+    monkeypatch.setattr(sec, "_SECRETS_JSON_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(sec, "_ENV_LOCAL_PATH", tmp_path / "no-env.local")
+    monkeypatch.setenv("BARK_TOKENS", "dummy-env")
+    assert sec.get_secret_list("BARK_TOKENS") == ["dummy-env"]
