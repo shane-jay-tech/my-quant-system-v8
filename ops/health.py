@@ -35,6 +35,20 @@ def warn(name, category, condition, detail=''):
         results['score']['warn'] += 1
     else:
         results['score']['passed'] += 1
+
+def _scan_hardcoded_bark_token() -> bool:
+    """扫描推送源码是否残留 32 位硬编码 token（S4CD-4/h912-09 提为公共路径；规则与名单与原 else 分支逐字一致）。"""
+    hardcoded = False
+    for rel in ('send_to_bark.py', 'bark_sender/push.py', 'bark_sender/config.py', 'bark_sender/channels.py'):
+        try:
+            with open(REPO_ROOT / rel, 'r', encoding='utf-8') as f:
+                if re.search('["\'][0-9A-Fa-f]{32}["\']', f.read()):
+                    hardcoded = True
+                    break
+        except Exception:
+            pass
+    return hardcoded
+
 def is_non_trading_day():
     """简单 heuristic：周末视为非交易日；周一15:30前也视为数据可接受较旧"""
     now = datetime.now()
@@ -234,18 +248,12 @@ def run_all():
         if bool(get_secret('BARK_KEY')) or bool(get_secret_list('BARK_TOKENS')):
             check('External: Bark token in secrets', 'external', True)
         elif not data_file('secrets.json').exists():
-            hardcoded = False
-            for rel in ('send_to_bark.py', 'bark_sender/push.py', 'bark_sender/config.py', 'bark_sender/channels.py'):
-                try:
-                    with open(REPO_ROOT / rel, 'r', encoding='utf-8') as f:
-                        if re.search('["\'][0-9A-Fa-f]{32}["\']', f.read()):
-                            hardcoded = True
-                            break
-                except Exception:
-                    pass
-            check('External: Bark token', 'external', not hardcoded, '推送源码中仍存在 32 位硬编码 token')
+            pass  # S4CD-4(h912-09): 原扫描分支提为下方公共路径，结果统一出口输出
         else:
             check('External: Bark token in secrets', 'external', False, 'secrets.json parse error or no token')
+        # S4CD-4(h912-09): 硬编码 token 扫描提到公共路径——无论走哪个分支都执行（扫描规则与名单与原分支一字未改）
+        hardcoded = _scan_hardcoded_bark_token()
+        check('External: Bark token', 'external', not hardcoded, '推送源码中仍存在 32 位硬编码 token')
         TASK_ALIASES = {'Daily pipeline': ['QuantDailyPipeline_v5', 'QuantDailyPipeline'], 'Weekly health': ['QuantWeeklyHealthCheck']}
         for desc, aliases in TASK_ALIASES.items():
             found = False

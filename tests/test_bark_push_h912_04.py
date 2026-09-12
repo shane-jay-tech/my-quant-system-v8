@@ -64,9 +64,12 @@ def test_send_from_newbie_file_missing_returns_none(tmp_path, monkeypatch):
 
 
 def test_send_from_newbie_file_parses_title_and_body(tmp_path, monkeypatch):
+    from datetime import datetime
+
     orders = tmp_path / "orders"
     orders.mkdir()
-    (orders / "bark_simple_20260912.txt").write_text(
+    today = datetime.now().strftime("%Y%m%d")
+    (orders / f"bark_simple_{today}.txt").write_text(
         "TITLE: 今日选股 3 只\n首选: 浦发银行(600000)\n止损-8% | 止盈+20% | 持10天\n",
         encoding="utf-8",
     )
