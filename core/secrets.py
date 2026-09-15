@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -21,6 +22,19 @@ from core.paths import DATA_DIR, REPO_ROOT
 
 _ENV_LOCAL_PATH: "os.PathLike[str]" = REPO_ROOT / '.env.local'
 _SECRETS_JSON_PATH: "os.PathLike[str]" = DATA_DIR / 'secrets.json'
+
+# S4CD-2（20260915-123647-66d5）：读取失败一次性 stderr 告警的去重台账——
+# (路径, 原因) 二元组，同进程内同一路径同原因最多告警一次，避免刷屏。
+_WARNED_READ_FAILURES: set[tuple[str, str]] = set()
+
+
+def _warn_read_failure(path: "os.PathLike[str]", reason: str) -> None:
+    """读取失败的一次性 stderr 告警：只给路径与失败原因，绝不输出键值或文件内容。"""
+    key = (str(path), reason)
+    if key in _WARNED_READ_FAILURES:
+        return
+    _WARNED_READ_FAILURES.add(key)
+    print(f"[secrets] read failure ({reason}): {path}", file=sys.stderr)
 
 
 class MissingSecretError(RuntimeError):
@@ -84,11 +98,13 @@ def _load_json_raw(path: "os.PathLike[str]", fp: tuple[int, int]) -> dict:
     单个 token 发给 Bark → 服务端回 "token错误或者失效"。列表/对象型配置必须走这里。
     """
     if fp == (-1, -1):
+        _warn_read_failure(path, 'missing')
         return {}
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.loads(f.read())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _warn_read_failure(path, f'parse/read failed: {type(exc).__name__}')
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -101,17 +117,20 @@ def _load_kv(path: "os.PathLike[str]", fp: tuple[int, int], fmt: str) -> dict[st
     值不落日志、不进异常，仅随 dict 在进程内流转。
     """
     if fp == (-1, -1):
+        _warn_read_failure(path, 'missing')
         return {}
     try:
         with open(path, 'r', encoding='utf-8') as f:
             text = f.read()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        _warn_read_failure(path, f'read failed: {type(exc).__name__}')
         return {}
     kv: dict[str, str] = {}
     if fmt == 'json':
         try:
             data = json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            _warn_read_failure(path, f'parse failed: {type(exc).__name__}')
             return {}
         if isinstance(data, dict):
             kv = {str(k): str(v) for k, v in data.items()}
