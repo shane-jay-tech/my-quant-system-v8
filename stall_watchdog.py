@@ -64,6 +64,16 @@ def _latest_date(pattern):
 
 
 def parse_yyyymmdd(s):
+    """把 ``YYYYMMDD`` 8 位日期串解析为 ``date``。
+
+    契约（q916-05，仅文档，不改行为）：
+    - 参数语义：``s`` 为 ``YYYYMMDD`` 形态的日期串（年 ``s[:4]``、月 ``s[4:6]``、
+      日 ``s[6:8]``），文件名日期与活动日均由此归一；
+    - 边界：不预校验位数——短串/空串在 ``int('')`` 处抛 ``ValueError``；
+      月/日越界（如 ``20260230``）由 ``date()`` 构造抛 ``ValueError``；
+    - 返回值：成功→``datetime.date``；无第三态（不返回 None）；
+    - 异常路径：任何非法输入一律 ``ValueError`` 向上抛，调用方自行兜底。
+    """
     return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
 
 
@@ -91,6 +101,20 @@ def weekdays_between(start_exclusive, end_inclusive, cal=None):
 
 
 def main():
+    """看门狗主入口：比对最后活动日与参照交易日，lag≥阈值则 Bark 告警。
+
+    契约（q916-05，仅文档，不改行为）：
+    - 参数语义：argv 接 ``--dry-run``（只打印判定，不推送任何告警）与
+      ``--threshold``（告警阈值，单位交易日，默认 2）；
+    - 边界：参照日＝max(最新 stock csv 日, ≤今天的最近交易日)——stock 缺失时
+      退化用最近交易日，故「无 stock csv」返回 1 分支实际不可达（防御保留）；
+      logs 与 orders 全缺→活动日无法确定→返回 1；日历不可用逐级退化
+      （真实日历→内置节假日表→Mon-Fri），参见 wt7 注；
+    - 返回值：0＝正常收敛（OK 判定，或 STALL 但 ``--dry-run`` 未推送）；
+      1＝输入缺失（无任何活动记录）；不返回 None；
+    - 异常路径：非 dry-run 的 STALL 分支才 ``import bark_sender`` 并推送，
+      其异常不在此捕获（向上抛）。
+    """
     ap = argparse.ArgumentParser(description="pipeline stall watchdog (read-only)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the verdict without pushing any alert")
