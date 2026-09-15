@@ -68,8 +68,17 @@ def parse_yyyymmdd(s):
 
 
 def weekdays_between(start_exclusive, end_inclusive, cal=None):
-    """统计 (start, end] 内的交易日。cal 为交易日集合（'YYYY-MM-DD'）时按真实
-    日历计数；None 时退化为工作日-内置节假日近似（原行为）。反向窗口 yield 0。"""
+    """统计 ``(start_exclusive, end_inclusive]``——左开右闭区间——内的交易日天数。
+
+    语义显式化（q914-33，仅文档，不改行为）：
+    - ``start_exclusive``：**不含当日**（左开）。起点当天即使为交易日也不计入；
+      参数名中的 ``_exclusive`` 即此义；
+    - ``end_inclusive``：**含当日**（右闭）。终点当天为交易日则计 1；
+    - 周末/节假日处理：``cal`` 提供交易日集合（'YYYY-MM-DD'）时按真实日历计数；
+      ``cal=None`` 退化为「周一至周五 − 内置节假日表(HOLIDAY_SETS)」近似（原行为）；
+    - 反向窗口（``end_inclusive <= start_exclusive``）一律返回 0，不抛错。
+    （原简注：统计 (start, end] 内的交易日；反向窗口 yield 0。）
+    """
     if end_inclusive <= start_exclusive:
         return 0
     count = 0
