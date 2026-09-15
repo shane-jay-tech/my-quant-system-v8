@@ -26,6 +26,8 @@ BOOKS_DIR = os.path.join(BASE_DIR, 'books')
 CLAUDE_MD = os.path.join(BASE_DIR, 'CLAUDE.md')
 MEMORY_MD = os.path.join(BASE_DIR, 'memory.md')
 
+from core.paths import KB_FILE  # noqa: E402  20260915-123648-c453：知识库数据层单一来源（core.paths）
+
 
 def find_unintegrated_reports():
     """找出头部未标记 [Integrated] 的报告"""
@@ -190,15 +192,35 @@ def _existing_content_fingerprints(content):
     return fps
 
 
-def update_claude_md(knowledge_entries):
-    """在 CLAUDE.md 中新建或追加 # 量化策略知识库 章节（幂等：按"来源"去重）。"""
-    if not os.path.exists(CLAUDE_MD):
-        print("[KNOWLEDGE] CLAUDE.md not found, creating...")
-        with open(CLAUDE_MD, 'w', encoding='utf-8') as fh:
-            fh.write("# 量化交易系统 - 项目规范\n\n")
+def _read_kb_content():
+    """过渡期双读（20260915-123648-c453）：优先 KB_FILE；缺失时回退 CLAUDE.md 旧节。
 
-    with open(CLAUDE_MD, 'r', encoding='utf-8') as fh:
-        content = fh.read()
+    回退命中时打一行 stderr 迁移提示；CLAUDE.md 旧节已替换为指针则返回 ''。
+    """
+    if os.path.exists(KB_FILE):
+        with open(KB_FILE, 'r', encoding='utf-8') as fh:
+            return fh.read()
+    if os.path.exists(CLAUDE_MD):
+        with open(CLAUDE_MD, 'r', encoding='utf-8') as fh:
+            legacy = fh.read()
+        if '# 量化策略知识库' in legacy:
+            print("[KNOWLEDGE] KB_FILE 缺失，回退读取 CLAUDE.md 旧节（迁移过渡期）", file=sys.stderr)
+            return legacy
+    return ''
+
+
+def update_claude_md(knowledge_entries):
+    """在 docs/knowledge/quant-kb.md 中新建或追加 # 量化策略知识库 章节（幂等：按"来源"去重）。
+
+    20260915-123648-c453：写入目标由 CLAUDE.md 迁移至 KB_FILE（数据层与指令层分离）；
+    去重基线过渡期双读——KB_FILE 缺失时回退读 CLAUDE.md 旧节（见 _read_kb_content）。
+    """
+    os.makedirs(os.path.dirname(KB_FILE), exist_ok=True)
+    content = _read_kb_content()
+    if not content:
+        with open(KB_FILE, 'w', encoding='utf-8') as fh:
+            fh.write('# 量化策略知识库\n\n')
+        content = '# 量化策略知识库\n\n'
 
     existing_sources = _extract_existing_sources(content)
     seen_fps = _existing_content_fingerprints(content)
@@ -239,9 +261,9 @@ def update_claude_md(knowledge_entries):
     else:
         new_content = content.rstrip() + '\n\n' + kb_header + '\n\n' + '\n---\n'.join(fresh_entries) + '\n'
 
-    with open(CLAUDE_MD, 'w', encoding='utf-8') as fh:
+    with open(KB_FILE, 'w', encoding='utf-8') as fh:
         fh.write(new_content)
-    print(f"[KNOWLEDGE] Updated CLAUDE.md: +{len(fresh_entries)} entries "
+    print(f"[KNOWLEDGE] Updated docs/knowledge/quant-kb.md: +{len(fresh_entries)} entries "
           f"(skipped {skipped_src} by-source, {skipped_content} by-content, {skipped_empty} empty)")
 
 
@@ -252,7 +274,7 @@ def dedupe_existing_kb(claude_path=None, dry_run=True, backup=True):
     只动知识库段落，段落以外的内容逐字保留。dry_run=True 时只报告不写盘。
     返回 dict：{total, kept, removed_dup, removed_empty, removed_sources}。
     """
-    path = claude_path or CLAUDE_MD
+    path = claude_path or KB_FILE
     with open(path, "r", encoding="utf-8") as fh:
         content = fh.read()
 
@@ -373,9 +395,12 @@ def integrate_books():
     if not os.path.exists(BOOKS_DIR):
         return books_kb
 
-    # 幂等：CLAUDE.md 已经收录的 books/ 来源直接跳过
+    # 幂等：知识库已经收录的 books/ 来源直接跳过（KB_FILE 缺失时过渡期回退 CLAUDE.md）
     existing_sources = set()
-    if os.path.exists(CLAUDE_MD):
+    if os.path.exists(KB_FILE):
+        with open(KB_FILE, 'r', encoding='utf-8') as fh:
+            existing_sources = _extract_existing_sources(fh.read())
+    elif os.path.exists(CLAUDE_MD):
         with open(CLAUDE_MD, 'r', encoding='utf-8') as fh:
             existing_sources = _extract_existing_sources(fh.read())
 
@@ -459,7 +484,7 @@ def main():
     print(f"\n[OK] Knowledge integration complete.")
     print(f"  Reports processed: {len(reports)}")
     print(f"  Knowledge entries: {len(knowledge_blocks)}")
-    print(f"  CLAUDE.md updated: {CLAUDE_MD}")
+    print(f"  Knowledge base updated: {KB_FILE}")
     return 0
 
 

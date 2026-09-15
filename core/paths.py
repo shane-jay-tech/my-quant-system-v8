@@ -22,6 +22,7 @@ REPORTS_DIR: Path = REPO_ROOT / 'reports'
 LOGS_DIR: Path = REPO_ROOT / 'logs'
 ORDERS_DIR: Path = REPO_ROOT / 'orders'
 BACKUP_DIR: Path = REPO_ROOT / 'backup'
+KB_FILE: Path = REPO_ROOT / 'docs' / 'knowledge' / 'quant-kb.md'
 
 _DATED_SUFFIX = _re.compile(r'_(\d{8})$')
 

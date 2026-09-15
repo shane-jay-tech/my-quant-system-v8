@@ -27,17 +27,31 @@ MEMORY_MD = os.path.join(BASE_DIR, 'memory.md')
 # v8.5: 单一版本号源
 sys.path.insert(0, BASE_DIR)
 from core.config import SYSTEM_VERSION
+from core.paths import KB_FILE  # noqa: E402  20260915-123648-c453：知识库数据层迁 docs/knowledge/quant-kb.md
 BACKTEST_FILE = os.path.join(BASE_DIR, 'enhanced_backtest.py')
 
 SAFETY_LIMIT = 2  # 连续退化次数上限，超过则暂停自动进化
 
 
+def _read_kb_content():
+    """过渡期双读：优先 docs/knowledge/quant-kb.md；缺失时回退 CLAUDE.md 旧节（stderr 提示）。"""
+    if os.path.exists(KB_FILE):
+        with open(KB_FILE, 'r', encoding='utf-8') as f:
+            return f.read()
+    if os.path.exists(CLAUDE_MD):
+        with open(CLAUDE_MD, 'r', encoding='utf-8') as f:
+            legacy = f.read()
+        if '# 量化策略知识库' in legacy:
+            print("[EVOLVE] KB_FILE 缺失，回退读取 CLAUDE.md 旧节（迁移过渡期）", file=sys.stderr)
+            return legacy
+    return ''
+
+
 def load_claude_knowledge():
-    """从 CLAUDE.md 提取知识库条目中标记为 [待验证] 的"""
-    if not os.path.exists(CLAUDE_MD):
+    """从知识库（docs/knowledge/quant-kb.md，迁移期回退 CLAUDE.md）提取 [待验证] 条目"""
+    content = _read_kb_content()
+    if not content:
         return []
-    with open(CLAUDE_MD, 'r', encoding='utf-8') as f:
-        content = f.read()
 
     pending = []
     for m in re.finditer(r'\[待验证\]\s*(.+?)(?:\n|$)', content):
@@ -46,9 +60,8 @@ def load_claude_knowledge():
 
 
 def mark_pending_if_needed():
-    """如果没有待验证条目，在 CLAUDE.md 中追加标记"""
-    with open(CLAUDE_MD, 'r', encoding='utf-8') as f:
-        content = f.read()
+    """如果没有待验证条目，在知识库文件中追加标记"""
+    content = _read_kb_content()
 
     if '[待验证]' in content:
         return True
@@ -63,9 +76,10 @@ def mark_pending_if_needed():
     else:
         content += '\n# 量化策略知识库\n' + new_entries + '\n'
 
-    with open(CLAUDE_MD, 'w', encoding='utf-8') as f:
+    os.makedirs(os.path.dirname(KB_FILE), exist_ok=True)
+    with open(KB_FILE, 'w', encoding='utf-8') as f:
         f.write(content)
-    print("[EVOLVE] Added 2 [待验证] entries to CLAUDE.md")
+    print("[EVOLVE] Added 2 [待验证] entries to docs/knowledge/quant-kb.md")
     return True
 
 
@@ -443,11 +457,11 @@ def adopt_if_accepted(verdict, improvement_desc, m4, m5, improve_fn, is_auto=Fal
 
 
 def mark_pending_tested(experiment_text, verdict):
-    """在 CLAUDE.md 中标记 [待验证] 条目为已验证"""
-    if not os.path.exists(CLAUDE_MD):
+    """在知识库文件中标记 [待验证] 条目为已验证"""
+    if not os.path.exists(KB_FILE):
         return
 
-    with open(CLAUDE_MD, 'r', encoding='utf-8') as f:
+    with open(KB_FILE, 'r', encoding='utf-8') as f:
         content = f.read()
 
     # 找到对应 [待验证] 条目并标记
@@ -456,9 +470,9 @@ def mark_pending_tested(experiment_text, verdict):
     new = f'[{status}] {experiment_text}'
     if old in content:
         content = content.replace(old, new)
-        with open(CLAUDE_MD, 'w', encoding='utf-8') as f:
+        with open(KB_FILE, 'w', encoding='utf-8') as f:
             f.write(content)
-        print(f"[EVOLVE] Marked CLAUDE.md: [{status}] {experiment_text[:50]}")
+        print(f"[EVOLVE] Marked quant-kb.md: [{status}] {experiment_text[:50]}")
 
 
 def main():

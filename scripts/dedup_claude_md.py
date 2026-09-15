@@ -9,9 +9,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.paths import REPO_ROOT
+from core.paths import KB_FILE
 
-CLAUDE_MD = REPO_ROOT / 'CLAUDE.md'
+# 20260915-123648-c453：知识库数据层已迁 docs/knowledge/quant-kb.md（原 CLAUDE.md）
 
 
 def split_kb_section(content):
@@ -39,7 +39,7 @@ def entry_source(entry):
 
 
 def main():
-    with open(CLAUDE_MD, 'r', encoding='utf-8') as f:
+    with open(KB_FILE, 'r', encoding='utf-8') as f:
         content = f.read()
 
     before, kb, after, _ = split_kb_section(content)
@@ -68,7 +68,7 @@ def main():
         print('[INFO] no duplicates found')
         return 0
 
-    with open(CLAUDE_MD, 'w', encoding='utf-8') as f:
+    with open(KB_FILE, 'w', encoding='utf-8') as f:
         f.write(new_content)
     removed = len(entries) - len(deduped_entries)
     print(f'[OK] removed {removed} duplicate entries; kept {len(deduped_entries)} unique entries')

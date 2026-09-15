@@ -30,13 +30,13 @@ def test_different_content_different_fingerprint():
 
 
 def test_update_claude_md_skips_content_duplicates(tmp_path, monkeypatch):
-    claude = tmp_path / "CLAUDE.md"
+    claude = tmp_path / "quant-kb.md"
     claude.write_text(
-        "# 量化交易系统\n\n# 量化策略知识库\n\n"
+        "# 量化策略知识库\n\n"
         "### 已有报告\n> 来源：`reports/daily_insight_20260601.md` | 整合日期：20260601\n"
         "**可落地建议**：\n- 建议3：RSI 阈值动态调整\n- 建议4：连涨/连跌过滤\n",
         encoding="utf-8")
-    monkeypatch.setattr(ik, "CLAUDE_MD", str(claude))
+    monkeypatch.setattr(ik, "KB_FILE", str(claude))
 
     # New entry: different source path, IDENTICAL substantive content -> must be skipped
     dup = ("### 新报告\n> 来源：`reports/daily_insight_20260602.md` | 整合日期：20260602\n"
@@ -47,19 +47,19 @@ def test_update_claude_md_skips_content_duplicates(tmp_path, monkeypatch):
 
 
 def test_update_claude_md_adds_genuinely_new(tmp_path, monkeypatch):
-    claude = tmp_path / "CLAUDE.md"
-    claude.write_text("# 量化交易系统\n\n# 量化策略知识库\n\n"
+    claude = tmp_path / "quant-kb.md"
+    claude.write_text("# 量化策略知识库\n\n"
                       "### 旧\n> 来源：`reports/a.md`\n- 建议3：RSI 动态\n", encoding="utf-8")
-    monkeypatch.setattr(ik, "CLAUDE_MD", str(claude))
+    monkeypatch.setattr(ik, "KB_FILE", str(claude))
     new = "### 全新\n> 来源：`reports/new.md` | 整合日期：20260617\n- 建议9：引入波动率因子\n"
     ik.update_claude_md([new])
     assert "建议9：引入波动率因子" in claude.read_text(encoding="utf-8")
 
 
 def test_update_claude_md_skips_empty_entries(tmp_path, monkeypatch):
-    claude = tmp_path / "CLAUDE.md"
-    claude.write_text("# 量化交易系统\n\n# 量化策略知识库\n\n", encoding="utf-8")
-    monkeypatch.setattr(ik, "CLAUDE_MD", str(claude))
+    claude = tmp_path / "quant-kb.md"
+    claude.write_text("# 量化策略知识库\n\n", encoding="utf-8")
+    monkeypatch.setattr(ik, "KB_FILE", str(claude))
     empty = "### 无内容\n> 来源：`reports/empty.md` | 整合日期：20260617\n"  # no bullets
     ik.update_claude_md([empty])
     assert "reports/empty.md" not in claude.read_text(encoding="utf-8")
