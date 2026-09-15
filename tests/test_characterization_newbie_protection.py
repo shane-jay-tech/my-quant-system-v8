@@ -53,7 +53,16 @@ def test_init_reads_back_same_file(np_env):
 
 @pytest.mark.parametrize('back_days,expected_min', [(3, 'observation'), (8, 'simulation'), (15, 'pre_live')])
 def test_update_time_floor(np_env, monkeypatch, back_days, expected_min):
-    today = datetime.now()
+    # n916b-02：冻结生产模块时钟（消除午夜翻转依赖；断言保持现状语义）
+    frozen = datetime(2026, 9, 14)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls):
+            return frozen
+
+    monkeypatch.setattr(np_mod, 'datetime', FixedDateTime)
+    today = frozen
     first = (today - timedelta(days=back_days)).strftime('%Y-%m-%d')
     _write_status(np_env, first)
     status = np_mod.update_newbie_status()
@@ -64,7 +73,7 @@ def test_update_time_floor(np_env, monkeypatch, back_days, expected_min):
 
 
 def test_phase_banner_and_tip_nonempty(np_env):
-    _write_status(np_env, datetime.now().strftime('%Y-%m-%d'))
+    _write_status(np_env, datetime(2026, 9, 14).strftime('%Y-%m-%d'))  # n916b-02 冻结日
     np_mod.init_newbie_status()
     assert isinstance(np_mod.get_phase_banner(), str) and np_mod.get_phase_banner()
     # 现状：tip 返回 {'title','body'} dict
