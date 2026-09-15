@@ -85,7 +85,8 @@ class TestHysteresis:
             {
                 "last_regime": CHOPPY,
                 "candidate_regime": WEAK_BULL,
-                "candidate_first_seen_date": (date.today() - timedelta(days=1)).isoformat(),
+                "candidate_first_seen_date": "2026-09-14",  # n916b-03 冻结日（昨天）
+
             },
         )
 
@@ -95,7 +96,7 @@ class TestHysteresis:
 
     def test_hysteresis_one_file_triggers_switch(self, isolated_position_sizer):
         data_dir = isolated_position_sizer["data_dir"]
-        today = date.today()
+        today = date(2026, 9, 14)   # n916b-03 冻结日
         yesterday = today - timedelta(days=1)
 
         _write_regime_state(
@@ -114,7 +115,7 @@ class TestHysteresis:
 
     def test_hysteresis_malformed_filename_no_error(self, isolated_position_sizer):
         data_dir = isolated_position_sizer["data_dir"]
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = date(2026, 9, 13)  # n916b-03 冻结日
 
         _write_regime_state(
             data_dir,
@@ -132,7 +133,7 @@ class TestHysteresis:
 
     def test_hysteresis_old_file_not_counted(self, isolated_position_sizer):
         data_dir = isolated_position_sizer["data_dir"]
-        today = date.today()
+        today = date(2026, 9, 14)  # n916b-03 冻结日
 
         _write_regime_state(
             data_dir,
