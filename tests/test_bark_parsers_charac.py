@@ -35,15 +35,18 @@ def test_parse_report_full_invalid_utf8_raises_unicodeerror(tmp_path):
         parsers.parse_report_full(str(f))
 
 
-def test_parse_report_full_short_row_raises_indexerror(tmp_path):
-    """【真缺陷冻结】列数不足的短行 → float(parts[3]) 抛 IndexError（try 只捕 ValueError），
-    整个解析崩溃——容错缺口已记报告遗留，待日间修（本单不改生产码）。"""
+def test_parse_report_full_short_row_skipped(tmp_path):
+    """【已修复】列数不足的短行 → 安全跳过（不抛 IndexError，返回稳定结构）。
+    原「真缺陷冻结」：float(parts[3]) 抛 IndexError（try 只捕 ValueError），整个解析崩溃；
+    2026-09-13 d913a-37 修复：except 捕 (ValueError, IndexError)，短行落 has_sector=True
+    分支后因 len(parts)<12 被跳过，正常行不受影响。"""
     good = "| 1 | 600000 | 浦发银行 | 10.00 | +1.0% | 9.8 | 9.5 | 55.0 | 1.2 | 500亿 | 80 |"
     broken = "| 2 | 000001 | 平安银行 |"  # 列数不足
     f = tmp_path / "pick_x.md"
     _write(f, f"2026-09-12 报告\n{good}\n{broken}\n")
-    with pytest.raises(IndexError):
-        parsers.parse_report_full(str(f))
+    pick_date, stocks = parsers.parse_report_full(str(f))
+    assert pick_date == "2026-09-12"
+    assert [s["code"] for s in stocks] == ["600000"]
 
 
 def test_parse_daily_orders_buys_missing_orders_dir_raises(tmp_path, monkeypatch):
@@ -77,9 +80,9 @@ def test_parse_daily_orders_buys_parses_buy_rows_with_thousands_separator(tmp_pa
     assert buys[0]["price"] == 1234.5 and buys[0]["shares"] == 100
 
 
-def test_parse_exit_advisor_sells_reads_today_file_and_stops_at_next_section(tmp_path, monkeypatch):
-    """今日 exit_advisor 文件：节内行解析、下一个 ## 节截断。"""
-    today = datetime.now().strftime("%Y%m%d")
+def test_parse_exit_advisor_sells_reads_today_file_and_stops_at_next_section(tmp_path, monkeypatch, frozen_clock):
+    """今日 exit_advisor 文件：节内行解析、下一个 ## 节截断。（d914-30：时钟冻结）"""
+    today = frozen_clock("2026-09-14 12:00:00").strftime("%Y%m%d")
     d = tmp_path
     (d / f"exit_advisor_{today}.md").write_text(
         "## 🚨 需要操作\n"

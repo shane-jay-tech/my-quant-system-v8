@@ -259,7 +259,7 @@ def build_personalized_section():
     try:
         df = pd.read_csv(real_file, dtype={'代码': str})
         if '备注' in df.columns:
-            df = df[~df['备注'].str.contains('示例', na=False)]
+            df = df[~df['备注'].fillna('').astype(str).str.contains('示例', na=False)]
         if len(df) == 0:
             return []
     except Exception:

@@ -30,7 +30,7 @@ def parse_report_full(filepath):
             try:
                 float(parts[3])
                 has_sector = False
-            except ValueError:
+            except (ValueError, IndexError):
                 has_sector = True
             if has_sector and len(parts) >= 12:
                 stocks.append({
