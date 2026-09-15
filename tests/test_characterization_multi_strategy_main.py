@@ -32,8 +32,9 @@ def io_env(tmp_path, monkeypatch):
     return {'data': data, 'results': results, 'orders': orders}
 
 
-def _write_today_stock(data_dir):
-    today = datetime.now().strftime('%Y%m%d')
+def _write_today_stock(data_dir, today: str | None = None):
+    # d914-06：today 由调用方/默认真实日传入（frozen_clock 场景显式固定），消除跨午夜日变
+    today = (today or datetime.now().strftime('%Y%m%d'))
     df = pd.DataFrame({
         '代码': ['000001', '000002', '600000'],
         '名称': ['平安银行', '万科A', '浦发银行'],
@@ -48,12 +49,13 @@ def _write_today_stock(data_dir):
     return today
 
 
-def _write_history(data_dir, days=40):
-    today = datetime.now()
+def _write_history(data_dir, days=40, today: str | None = None):
+    _now = datetime.strptime(today, '%Y%m%d') if today else datetime.now()
+    today_dt = _now
     rows = []
     price = 10.0
     for i in range(days):
-        d = (today - timedelta(days=days - i)).strftime('%Y-%m-%d')
+        d = (today_dt - timedelta(days=days - i)).strftime('%Y-%m-%d')
         for code in ('000001', '000002', '600000'):
             price = 10.0 + i * 0.01 + (0.1 if code == '000002' else 0)
             rows.append({'日期': d, '代码': code, '收盘': round(price, 2)})
@@ -69,9 +71,10 @@ def test_main_no_data_fatal_branch(io_env, capsys):
     assert 'No stock data found' in capsys.readouterr().out
 
 
-def test_main_runs_with_minimal_data(io_env, capsys):
-    _write_today_stock(io_env['data'])
-    _write_history(io_env['data'])
+def test_main_runs_with_minimal_data(io_env, capsys, frozen_clock):
+    frozen_clock('2026-09-14 12:00:00')  # d914-06：确定性时钟，消除跨午夜日变
+    _write_today_stock(io_env['data'], today='20260914')
+    _write_history(io_env['data'], today='20260914')
     rc = ms_mod.main()
     assert rc == 0
     out = capsys.readouterr().out
@@ -79,8 +82,21 @@ def test_main_runs_with_minimal_data(io_env, capsys):
     assert ('Vote saved' in out) or ('No consensus picks' in out)
 
 
-def test_mid_low_tier_strategies_instantiable_and_runnable(io_env):
-    _write_history(io_env['data'])
+def test_mid_low_tier_strategies_instantiable_and_runnable(io_env, frozen_clock):
+    frozen_clock('2026-09-14 12:00:00')  # d914-06
+    _write_history(io_env['data'], today='20260914')
     for cls in (ms_mod.MeanReversionStrategy, ms_mod.LowVolatilityStrategy):
         s = cls()
         assert hasattr(s, 'name') or hasattr(s, 'generate'), '策略对象缺基本接口'
+
+
+def test_write_today_stock_cross_midnight_no_date_bleed(io_env, frozen_clock, monkeypatch):
+    """d914-06：跨午夜用例——23:59:59 与 00:00:01 两次写入，文件名不串日。"""
+    frozen_clock('2026-09-13 23:59:59')
+    today_a = _write_today_stock(io_env['data'], today='20260913')
+    assert today_a == '20260913'
+    frozen_clock('2026-09-14 00:00:01')
+    today_b = _write_today_stock(io_env['data'], today='20260914')
+    assert today_b == '20260914'
+    assert (io_env['data'] / 'stock_20260913.csv').exists()
+    assert (io_env['data'] / 'stock_20260914.csv').exists()
