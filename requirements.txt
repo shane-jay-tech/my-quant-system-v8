@@ -26,3 +26,4 @@ scipy>=1.10.0,<2.0
 
 # 开发/验证（README「验证」一节依赖；v8.7 补：此前 .venv 缺 pytest 导致 README 命令跑不起来）
 pytest>=8.0,<10.0
+coverage>=7.0,<8.0
