@@ -10,6 +10,8 @@ from pathlib import Path
 
 import ops.health as health
 
+import pytest
+
 
 def _run_branch(monkeypatch, tmp_path, *, bark_key, tokens, secrets_exists):
     """在指定分支配置下跑 run_all，返回（检查项列表, spy 调用次数）。"""
@@ -63,3 +65,19 @@ def test_scan_runs_on_else_branch(monkeypatch, tmp_path):
     )
     assert calls >= 1, "else 分支未执行硬编码扫描（S4CD-4 病灶）"
     assert len(checks) == 1
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+def test_schtasks_decode_no_thread_warning(monkeypatch, tmp_path):
+    """n916d-16 同族（n916d-17 顺延单）：schtasks GBK 输出不再炸 UTF-8 读线程。
+
+    锁定：run_all 全程无 PytestUnhandledThreadExceptionWarning（subprocess 读线程
+    加 encoding+errors=replace 后不再抛 UnicodeDecodeError）。
+    """
+    import pytest
+
+    monkeypatch.setattr(health, "get_secret", lambda k: None)
+    monkeypatch.setattr(health, "get_secret_list", lambda k: [])
+    monkeypatch.setattr(health, "data_file", lambda name: tmp_path / "_absent.json")
+    monkeypatch.setattr(health, "REPORTS_DIR", tmp_path / "reports")
+    health.run_all()

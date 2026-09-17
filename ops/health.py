@@ -259,7 +259,8 @@ def run_all():
             found = False
             for task_name in aliases:
                 try:
-                    r = subprocess.run(['schtasks', '/query', '/tn', task_name, '/fo', 'CSV'], capture_output=True, text=True, timeout=10)
+                    # n916d-16 同族解码防御：schtasks 输出为 GBK，UTF-8 模式下 text=True 读线程会炸
+                    r = subprocess.run(['schtasks', '/query', '/tn', task_name, '/fo', 'CSV'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
                     if r.returncode == 0 and task_name in r.stdout:
                         found = True
                         break
@@ -268,7 +269,7 @@ def run_all():
             check(f'External: {desc} task', 'external', found)
         _morning_found = False
         try:
-            _r = subprocess.run(['schtasks', '/query', '/tn', 'QuantMorningPipeline', '/fo', 'CSV'], capture_output=True, text=True, timeout=10)
+            _r = subprocess.run(['schtasks', '/query', '/tn', 'QuantMorningPipeline', '/fo', 'CSV'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
             _morning_found = _r.returncode == 0 and 'QuantMorningPipeline' in _r.stdout
         except Exception:
             pass
