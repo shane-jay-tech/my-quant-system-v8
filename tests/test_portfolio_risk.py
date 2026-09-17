@@ -199,11 +199,8 @@ def test_generate_report_aggregates_all_force_actions(monkeypatch):
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="generate_risk_report 对 correlation=None 直接调用 .get，单持仓会崩溃",
-)
 def test_generate_report_supports_single_position(monkeypatch):
+    """n916d-16：单持仓 correlation=None 不再崩溃（原 xfail 转正）。"""
     monkeypatch.setattr(pr, "check_drawdown", lambda state: {"action": "normal"})
     monkeypatch.setattr(pr, "check_volatility_target", lambda state: {"action": "normal"})
     state = {
@@ -212,6 +209,33 @@ def test_generate_report_supports_single_position(monkeypatch):
     }
     report = pr.generate_risk_report(state)
     assert report["correlation"] is None
+    assert report["recommended_actions"] == []
+
+
+def test_generate_report_empty_positions(monkeypatch):
+    """n916d-16 边界：空持仓列表 ⇒ correlation=None 且零崩溃。"""
+    monkeypatch.setattr(pr, "check_drawdown", lambda state: {"action": "normal"})
+    monkeypatch.setattr(pr, "check_volatility_target", lambda state: {"action": "normal"})
+    report = pr.generate_risk_report({"cash": 1000, "positions": []})
+    assert report["correlation"] is None
+    assert report["recommended_actions"] == []
+
+
+def test_generate_report_correlation_calc_none(monkeypatch):
+    """n916d-16 边界：多持仓但 calc_correlation_matrix 返回 None ⇒ 不进 VaR、无告警。"""
+    monkeypatch.setattr(pr, "check_drawdown", lambda state: {"action": "normal"})
+    monkeypatch.setattr(pr, "check_volatility_target", lambda state: {"action": "normal"})
+    monkeypatch.setattr(pr, "calc_correlation_matrix", lambda codes: None)
+    state = {
+        "cash": 1000,
+        "positions": [
+            {"code": "000001", "current_price": 10, "shares": 10},
+            {"code": "000002", "current_price": 20, "shares": 5},
+        ],
+    }
+    report = pr.generate_risk_report(state)
+    assert report["correlation"] is None
+    assert "var_95" not in report and "cvar_95" not in report
     assert report["recommended_actions"] == []
 
 

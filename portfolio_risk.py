@@ -288,7 +288,9 @@ def generate_risk_report(state, new_orders=None):
         actions.append(report['drawdown']['message'])
     if report['volatility'].get('action') == 'force_reduce':
         actions.append(report['volatility']['message'])
-    if report.get('correlation', {}).get('warning'):
+    # correlation=None（单持仓/无数据）时 dict.get 的默认 {} 不生效——or {} 兜底
+    # （n916d-16 最小修复：只防空，不改任何数值口径）
+    if (report.get('correlation') or {}).get('warning'):
         actions.append(f'持仓相关性过高: {report["correlation"]["max_pair"]}={report["correlation"]["max_corr"]}')
     if report.get('turnover', {}).get('breached'):
         actions.append(report['turnover']['message'])
