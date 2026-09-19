@@ -149,3 +149,64 @@ def test_research_mode_empty_and_full(monkeypatch):
     assert "## 策略回测绩效" in body and "净收益 +5%" in body and "超额收益: +2%" in body
     assert "## 今日选股及因子得分" in body and "股A(600000)" in body
     assert "## 板块分布" in body and "*研究模式报告 · 仅供量化研究参考*" in body
+
+
+# ---- q918-06（S5 B-6）：auto 档真依赖接线——附录函数不 stub，只隔离读盘路径 ----
+
+
+def _wire_env(monkeypatch, tmp_path):
+    """与 _stub_env 同样的外部读数隔离，但保留三个附录真函数，读盘指向 tmp_path。"""
+    monkeypatch.setattr(builders, "build_personalized_section", lambda: [])
+    monkeypatch.setattr(builders, "parse_performance_tracking", lambda: None)
+    monkeypatch.setattr(builders, "parse_honest_eval", lambda: None)
+    monkeypatch.setattr(builders, "classify_sector", lambda code, name: "银行")
+
+    class _Gate:
+        should_show_banner = False
+        severity = "unknown"
+
+    monkeypatch.setattr(builders, "evaluate_etf_gate", lambda base: _Gate())
+    monkeypatch.setattr(builders, "format_gate_banner", lambda gate: "")
+
+    from core import config as core_config
+    monkeypatch.setattr(core_config, "BARK_TEMPLATE_LEVEL", "auto")
+
+    data_dir = tmp_path / "data"
+    orders_dir = tmp_path / "orders"
+    broker_dir = tmp_path / "broker_orders"
+    data_dir.mkdir()
+    orders_dir.mkdir()
+    monkeypatch.setattr(builders, "DATA_DIR", str(data_dir), raising=False)
+    monkeypatch.setattr(builders, "ORDERS_DIR", str(orders_dir), raising=False)
+    monkeypatch.setattr(builders, "BROKER_ORDERS_DIR", str(broker_dir), raising=False)
+    return data_dir, orders_dir, broker_dir
+
+
+def test_tier_auto_real_addendum_wiring_headers_in_order(monkeypatch, tmp_path):
+    """auto 档真依赖接线：最小种子文件喂真附录函数，正文含三段标题且顺序
+    组合风控→券商订单→摩擦成本（结构断言，零数值断言；种子金额仅为让摩擦段非空）。"""
+    import json
+
+    data_dir, orders_dir, broker_dir = _wire_env(monkeypatch, tmp_path)
+    (data_dir / "risk_report.json").write_text("{}", encoding="utf-8")   # 空风控报告也出标题
+    broker_dir.mkdir()
+    (broker_dir / "order_20260912.csv").write_text("placeholder", encoding="utf-8")
+    (orders_dir / "daily_orders_20260912.json").write_text(
+        json.dumps({"订单": [{"金额": 1000}]}, ensure_ascii=False), encoding="utf-8"
+    )
+
+    _, body = builders.build_bark_message_for_tier("2026-09-12", [_stock()])
+    assert "═══ 组合风控（Pro 级）═══" in body
+    assert "═══ 券商订单（Auto 级）═══" in body
+    assert "═══ 摩擦成本预估 ═══" in body
+    assert body.index("组合风控（Pro 级）") < body.index("券商订单（Auto 级）") < body.index("摩擦成本预估")
+
+
+def test_tier_auto_empty_data_yields_no_addendum_headers(monkeypatch, tmp_path):
+    """真依赖空数据侧：tmp 目录全空 → 三个附录真函数全走「无数据→空串」分支，
+    正文不含任何附录标题（证明接线读的是被隔离的真实路径，非 stub 残留）。"""
+    _wire_env(monkeypatch, tmp_path)
+    _, body = builders.build_bark_message_for_tier("2026-09-12", [_stock()])
+    assert "═══ 组合风控（Pro 级）═══" not in body
+    assert "═══ 券商订单（Auto 级）═══" not in body
+    assert "═══ 摩擦成本预估 ═══" not in body
