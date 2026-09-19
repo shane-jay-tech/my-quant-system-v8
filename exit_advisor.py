@@ -94,6 +94,7 @@ def load_real_positions():
         return []
     df = pd.read_csv(path, dtype={'代码': str})
     if '备注' in df.columns:
+        df['备注'] = df['备注'].fillna('').astype(str)  # q918-15 守卫（样板 formatters.py:262）
         df = df[~df['备注'].str.contains('示例', na=False)]
     df['日期'] = pd.to_datetime(df.get('日期', pd.NaT), errors='coerce')
     # 同日买卖：买入先入队

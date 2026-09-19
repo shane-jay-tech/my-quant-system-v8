@@ -269,6 +269,7 @@ def load_real_trades():
         df = pd.read_csv(real_file, dtype={'代码': str})
         # 过滤掉示例数据行
         if '备注' in df.columns:
+            df['备注'] = df['备注'].fillna('').astype(str)  # q918-15 守卫（样板 formatters.py:262）
             df = df[~df['备注'].str.contains('示例数据', na=False)]
         return df, len(df)
     except Exception:
