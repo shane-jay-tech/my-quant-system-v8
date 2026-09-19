@@ -63,12 +63,13 @@ def test_recorded_kwargs_decode_real_cp936_bytes_without_mangling(spy, tmp_path)
     """
     auto_heal.run_script("some_script.py")
     kw = spy[0]
+    assert kw.get("errors") == "replace", "防御被摘掉，后面的解码对比就没有意义了"
     gbk_bytes = "中文标记OK".encode("gbk")
 
     # subprocess text=True 的真实语义：encoding=None ⇒ locale 首选编码（bytes.decode 本身不收 None）
     enc = kw.get("encoding") or locale.getpreferredencoding(False)
-    decoded = gbk_bytes.decode(enc, kw.get("errors"))
-    assert "中文标记OK" in decoded or "OK" in decoded                  # 关键是不抛
+    decoded = gbk_bytes.decode(enc, kw.get("errors") or "strict")
+    assert "中文标记OK" in decoded                                     # 与子进程同源 ⇒ 中文逐字还原
     with pytest.raises(UnicodeDecodeError):
         gbk_bytes.decode("utf-8")                                     # 病灶：严格 UTF-8 必炸
     assert "中文" not in gbk_bytes.decode("utf-8", "replace")           # 反证：utf-8+replace 把中文换没了
