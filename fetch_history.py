@@ -31,6 +31,11 @@ HISTORY_FILE = DATA_DIR / 'history.csv'
 # 线程安全锁（写文件用）
 write_lock = Lock()
 
+# ========== dry-run 保护（q916-04 切片1，设计稿 quant-dryrun-fetch-design-20260916）==========
+# 契约：网络请求路径不变；命中写点/备份副作用时短路并打印 [DRY-RUN]；默认行为（无旗标）逐字节不变。
+DRY = False
+DRY_HITS = []        # 本次运行被拦的写点记录（W0/W1/W2/W3），收尾汇总用
+
 # ========== 反反爬配置 ==========
 HEADERS_TEMPLATES = [
     {
@@ -322,23 +327,35 @@ def try_em_fastpath(codes_to_fetch, latest_by_code, target_date_str, sina_snapsh
         return None
 
     # 写盘前先备份（保留 history.csv.bak），校验全部通过才追加
-    try:
-        if os.path.exists(HISTORY_FILE):
-            shutil.copy2(HISTORY_FILE, HISTORY_FILE.with_name(HISTORY_FILE.name + '.bak'))
-    except Exception as e:
-        print(f'[EM-FASTPATH] backup failed: {e}; fall back to Sina per-stock path')
-        return None
-    try:
-        with write_lock:
-            header = not os.path.exists(HISTORY_FILE)
-            em_new.to_csv(HISTORY_FILE, mode='a', index=False,
-                          encoding='utf-8-sig', header=header)
-    except Exception as e:
-        print(f'[EM-FASTPATH] append failed: {e}; fall back to Sina per-stock path')
-        return None
+    if DRY:
+        print(f'[DRY-RUN] W0 would-backup -> {HISTORY_FILE}.bak')
+        DRY_HITS.append(('W0', str(HISTORY_FILE) + '.bak'))
+    else:
+        try:
+            if os.path.exists(HISTORY_FILE):
+                shutil.copy2(HISTORY_FILE, HISTORY_FILE.with_name(HISTORY_FILE.name + '.bak'))
+        except Exception as e:
+            print(f'[EM-FASTPATH] backup failed: {e}; fall back to Sina per-stock path')
+            return None
+    if DRY:
+        print(f'[DRY-RUN] W1 would-append -> {HISTORY_FILE} ({len(em_new)} rows, mode=append)')
+        DRY_HITS.append(('W1', str(HISTORY_FILE)))
+    else:
+        try:
+            with write_lock:
+                header = not os.path.exists(HISTORY_FILE)
+                em_new.to_csv(HISTORY_FILE, mode='a', index=False,
+                              encoding='utf-8-sig', header=header)
+        except Exception as e:
+            print(f'[EM-FASTPATH] append failed: {e}; fall back to Sina per-stock path')
+            return None
 
-    print(f'[EM-FASTPATH] OK: appended {len(em_new)} rows from eastmoney snapshot '
-          f'({detail}); {len(codes_to_fetch) - len(em_new)} stocks left for Sina path')
+    if DRY:
+        print(f'[EM-FASTPATH] DRY: would append {len(em_new)} rows from eastmoney snapshot '
+              f'({detail}); {len(codes_to_fetch) - len(em_new)} stocks left for Sina path')
+    else:
+        print(f'[EM-FASTPATH] OK: appended {len(em_new)} rows from eastmoney snapshot '
+              f'({detail}); {len(codes_to_fetch) - len(em_new)} stocks left for Sina path')
     return set(em_new['代码'].tolist())
 
 
@@ -356,6 +373,10 @@ def get_existing_codes():
 
 def save_increment(df_new, mode='a'):
     """增量保存 CSV"""
+    if DRY:
+        print(f'[DRY-RUN] W2 would-append -> {HISTORY_FILE} ({len(df_new)} rows, mode={mode})')
+        DRY_HITS.append(('W2', str(HISTORY_FILE)))
+        return None
     with write_lock:
         header = not os.path.exists(HISTORY_FILE) or mode == 'w'
         df_new.to_csv(HISTORY_FILE, mode=mode, index=False,
@@ -363,8 +384,46 @@ def save_increment(df_new, mode='a'):
 
 
 # ========== 主流程 ==========
-def main():
+def final_dedupe():
+    """Step 4.5 最终去重——把 stream-append 写入的多版本压平（dry-run 下短路并打印将写计划）。"""
+    # Round-2 修复（2026-05-30）：移除冗余的 existing_full concat，单 disk_df 自带去重
+    # disk_df 已经包含了"原始记录 + 本次 stream-append 内容"，再合并 existing_full 是无意义的双倍内存
+    try:
+        if os.path.exists(HISTORY_FILE):
+            disk_df = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
+            if not disk_df.empty:
+                disk_df = disk_df.drop_duplicates(subset=['代码', '日期'], keep='first')
+                disk_df = disk_df.sort_values(['代码', '日期']).reset_index(drop=True)
+                if DRY:
+                    print(f'[DRY-RUN] W3 would-rewrite -> {HISTORY_FILE} '
+                          f'({len(disk_df)} rows, mode=rewrite)')
+                    DRY_HITS.append(('W3', str(HISTORY_FILE)))
+                    return
+                # 原子写（.tmp + os.replace）：断电/异常不会留下半截文件
+                tmp_path = HISTORY_FILE + '.tmp'
+                disk_df.to_csv(tmp_path, index=False, encoding='utf-8-sig')
+                os.replace(tmp_path, HISTORY_FILE)
+    except Exception as e:
+        print(f"[WARN] Final dedupe failed: {e}（已保留原有数据，不会丢失）")
+
+
+def _parse_args(argv):
+    """q916-04 切片1：--dry-run 旗标（网络照常、写点短路）。默认行为与历史版本完全一致。"""
+    import argparse
+    parser = argparse.ArgumentParser(description='历史日线数据下载器')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='预演模式：网络请求照常，所有写点与备份副作用短路，仅打印 would-write')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    global DRY
+    args = _parse_args(argv)
+    DRY = args.dry_run
+    DRY_HITS.clear()
     print(f"{'='*50}")
+    if DRY:
+        print("  [DRY-RUN] 历史数据下载器预演（写点将短路）")
     print(f"  历史数据下载器启动 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  目标：过去 {HISTORY_DAYS} 个交易日，{MAX_WORKERS} 线程并发")
     print(f"{'='*50}")
@@ -488,21 +547,8 @@ def main():
     print(f"  Saved to: {HISTORY_FILE}")
     print(f"{'='*50}")
 
-    # Step 4.5 (v8.5): 最终去重——把 stream-append 写入的多版本压平
-    # Round-2 修复（2026-05-30）：移除冗余的 existing_full concat，单 disk_df 自带去重
-    # disk_df 已经包含了"原始记录 + 本次 stream-append 内容"，再合并 existing_full 是无意义的双倍内存
-    try:
-        if os.path.exists(HISTORY_FILE):
-            disk_df = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
-            if not disk_df.empty:
-                disk_df = disk_df.drop_duplicates(subset=['代码', '日期'], keep='first')
-                disk_df = disk_df.sort_values(['代码', '日期']).reset_index(drop=True)
-                # 原子写（.tmp + os.replace）：断电/异常不会留下半截文件
-                tmp_path = HISTORY_FILE + '.tmp'
-                disk_df.to_csv(tmp_path, index=False, encoding='utf-8-sig')
-                os.replace(tmp_path, HISTORY_FILE)
-    except Exception as e:
-        print(f"[WARN] Final dedupe failed: {e}（已保留原有数据，不会丢失）")
+    # Step 4.5 (v8.5): 最终去重——把 stream-append 写入的多版本压平（dry-run 下短路）
+    final_dedupe()
 
     # Step 5: 验证数据
     if os.path.exists(HISTORY_FILE):
@@ -511,6 +557,10 @@ def main():
         date_range = f"{final['日期'].min()} ~ {final['日期'].max()}"
         print(f"  Final: {len(final)} rows, {unique_stocks} unique stocks")
         print(f"  Date range: {date_range}")
+
+    if DRY:
+        targets = '; '.join(f'{w}->{p}' for w, p in DRY_HITS) or '（无）'
+        print(f"[DRY-RUN] would-write: {len(DRY_HITS)} 个写点, 目标={targets}; 实际写盘 0 字节")
 
     return 0
 

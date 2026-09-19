@@ -5,7 +5,7 @@
 conftest.py:45-50 注释原文：「给时敏测试加了 frozen_clock，但**漏登记本表 → fixture
 静默不 patch 任何东西**，测试用冻结日期拼文件名、被测代码仍取真实日期（parsers.py:128
 / push.py:53）→ 跨日必挂」（2026-09-15 bark 两失败根因，修复记录
-docs/insights/quant-bark-2fail-20260916.md）。本哨兵把「登记表三契约」变成收集期即可
+docs/insights/quant-bark-2fail-20260916.md（量化仓））。本哨兵把「登记表三契约」变成收集期即可
 红的断言：键可导入／属性存在／冻结真实生效。
 
 ## 验证（命令与数字同段）

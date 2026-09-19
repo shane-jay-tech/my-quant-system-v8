@@ -1,6 +1,6 @@
 # quant 低覆盖模块真实补测批 A 报告（h912-04，2026-09-12 夜班）
 
-任务：按根仓基线 `docs/insights/quant-test-baseline-20260911.md` §四，取覆盖率升序前 3 个模块补 characterization 测试（零生产码改动）。
+任务：按根仓基线 `D:\code\docs\insights\quant-test-baseline-20260911.md` §四，取覆盖率升序前 3 个模块补 characterization 测试（零生产码改动）。
 
 ## 模块选择与不相交声明
 

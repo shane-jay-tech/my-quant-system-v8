@@ -1,6 +1,6 @@
 # quant S4 批 c/d R2 快审 4 条 MINOR/SUGGESTION 处置清单（2026-09-12 夜间执行班，任务 p911r-38，零改码）
 
-> 执行：GLM-5.3-Flash 夜间执行班 sweep-20260911-2300。来源：`docs/insights/s4-cd-r2-diff-review-20260911.md`（38b08c4）。**未改任何代码；未 commit/push。** 现状核对均以只读 grep 实查（标注「现值」）。
+> 执行：GLM-5.3-Flash 夜间执行班 sweep-20260911-2300。来源：`docs/insights/s4-cd-r2-diff-review-20260911.md（量化仓）`（38b08c4）。**未改任何代码；未 commit/push。** 现状核对均以只读 grep 实查（标注「现值」）。
 
 ## 一、处置表（4/4 条）
 

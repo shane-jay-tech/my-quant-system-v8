@@ -7,7 +7,7 @@ $ git status --porcelain | grep -E '\?\? (backup|tmp)/'
 ?? backup/
 ?? tmp/
 $ 文件计数：backup/ 52 个文件（backup/state/<YYYYMMDD>/ 日更，backup_state.py:25 持续产生）；
-  tmp/ 9 个文件（含被 docs/insights/empty-remark-nan-repro-20260914.md 引用的 repro_5934.py，
+  tmp/ 9 个文件（含被 docs/insights/empty-remark-nan-repro-20260914.md（量化仓） 引用的 repro_5934.py，
   及 audit/、patches/、repro-env/ 等夜间任务工作目录）
 $ git ls-files backup tmp → 空（两者均未被跟踪，忽略规则可生效）
 ```

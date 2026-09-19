@@ -1,6 +1,6 @@
 # quant 数据取数类写入脚本 dry-run 保护设计稿（q916-04，2026-09-16，只出设计零实现）
 
-- 上游：q914-32 写入路径矩阵（`docs/insights/quant-write-path-matrix-20260914.md`，根仓）——48 脚本/83 写点/dry-run 仅 6 个；本单取其「次高优」取数类一档＝fetch_history.py／fetch_minute_kline.py（矩阵 B 段「3/3 写点、无旗标、高（写行情数据文件）」两行，与本稿设计表行数一致）。
+- 上游：q914-32 写入路径矩阵（`D:\code\docs\insights\quant-write-path-matrix-20260914.md`，根仓）——48 脚本/83 写点/dry-run 仅 6 个；本单取其「次高优」取数类一档＝fetch_history.py／fetch_minute_kline.py（矩阵 B 段「3/3 写点、无旗标、高（写行情数据文件）」两行，与本稿设计表行数一致）。
 - 零实现声明：`git diff --stat` 为空（见第四节自证）；未改任何写入脚本；未碰持仓/下单/风控脚本；不 push。
 
 ## 一、逐脚本写点与副作用（静态判定，全部可判，无待核条目）

@@ -56,7 +56,7 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 
 流水线由 `core/pipeline.py` 的步骤注册表驱动，按 `SYSTEM_TIER`（beginner / advanced / pro / auto）与周期过滤：
 
-- **每日核心**：交易日检测 → 行情/ETF/指数抓取 → 数据校验 → 选股策略 → 多策略对比 → 分钟 K 线 → 出场顾问 → 仓位计算 → 轻量进化 → 模拟交易 → 策略反馈 → shadow 多空分析 → 研究复盘 → 知识内化 → 交易心理 → 新手保护 → 成本审计 → 持仓同步 → 行为日志 → 开盘前简报 → 决策回放 → 推送（Bark / webhook / 飞书）→ 目标指标 → 自检 → 自动修复 → 数据归档。
+- **每日核心**：交易日检测 → 行情/ETF/指数抓取 → 数据层 → 数据校验 → 选股策略 → 多策略对比 → 回测(分档成本) → 分钟 K 线 → 出场顾问 → 仓位计算 → 轻量进化 → 模拟交易 → 策略反馈 → shadow 多空分析 → 券商导出 → 研究复盘 → 追踪 → 知识内化 → 交易心理 → 新手保护 → 新手指令卡 → 成本审计 → 持仓同步 → 行为日志 → 开盘前简报 → 决策回放 → 推送（Bark / webhook / 飞书）→ 目标指标 → 自检 → 自动修复 → 数据归档。
 - **周期任务**：周一因子 IC/IR 与 arXiv 研究；周三 Walk-Forward；周四策略自动进化；周五策略竞技与基准对比；月末蒙特卡洛、Tracking Error 与月度行为报告。
 - **风控门**：Alpha Gate 在连续 5 个交易日跑输沪深 300 时自动暂停选股并提示 ETF；净值回撤与波动率触发组合风控锁；每笔订单过成本门槛。
 - **新手保护**：观察期 / 模拟期 / 实盘预备期三阶段，由学习、录入、纪律和自评四项指标综合推进。
@@ -67,15 +67,20 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 - **策略**：五维因子评分、多策略加权投票、动态参数（RSI/MA 随 5 档市场状态切换）、分档成本回测。
 - **风控**：ATR 止损、板块集中度、仓位五档、VaR/CVaR、Walk-Forward 与蒙特卡洛过拟合检查。
 - **闭环**：选股表现追踪、策略反馈、出场顾问、交易分析器、心理助手、行为偏差报告。
-- **自愈**：`_self_check.py` 140+ 项自检 + `auto_heal.py` 自动修复；目标指标追踪流水线成功率、数据完整率与自检通过率。
+- **自愈**：`ops/health.py` 自检 + `auto_heal.py` 自动修复；目标指标追踪流水线成功率、数据完整率与自检通过率。
 - **交付层（v8.7 预备）**：`digest.py` 把当日全部产出提炼成【结论/信号/风险/动作】四段 200 字简报（无 LLM key 走规则兜底）；`decision_replay.py` 生成纯本地单文件 HTML 决策回放；`bark_sender/channels.py` 渠道注册表，Bark 之外可加 webhook / 飞书，逐渠道失败隔离。
 - **LLM 融合层（shadow）**：`llm_analyst.py` 对规则筛出的 top3 跑多头→空头→裁决三角色，观点只能引用当日数据快照，**不改任何订单**，`--evaluate` 与 5 日前瞻收益对账；统一通道 `core/llm.py`，密钥零硬编码，每次调用计入成本审计。
+
+> **当前状态（2026-09-17 核验更新）**：① LLM 融合层仍待配置 `DEEPSEEK_API_KEY`（llm_available=False）；
+② QuantMorningPipeline（09:15）与 QuantStallWatchdog（21:00）两个计划任务均已注册就绪；
+③ 日终流水线已恢复（b828b9a），logs/pipeline_20260916.log 起 15:37 档每日运行正常；
+④ 4 个 bat 行尾问题（计划任务 9009）已于 2026-09-04 重写修复并验证。
 
 ## 验证
 
 ```powershell
 python -m pytest                # 单元与回归测试（需 pip install pytest，见 requirements.txt）
-python _self_check.py           # 系统自检（含环境、密钥、文件、数据新鲜度，报告写入 reports/）
+python ops/health.py            # 系统自检（含环境、密钥、文件、数据新鲜度，报告写入 reports/）
 python smoke_tests.py           # 冒烟测试
 python goal_metrics.py          # 目标指标
 python daily_pipeline.py        # 手动执行一次日终流水线

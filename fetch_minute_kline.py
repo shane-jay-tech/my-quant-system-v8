@@ -38,6 +38,11 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = [5, 10, 20]  # 秒
 MIN_SUCCESS_RATE = 0.70      # 单批次成功率阈值，低于此值整体降级
 
+# ========== dry-run 保护（q916-04 切片2，设计稿 quant-dryrun-fetch-design-20260916）==========
+# 契约：网络拉取照常；W1 写文件/W2 降级标记/W2' 删标记/W3 状态写全部短路并打印；默认行为不变。
+DRY = False
+DRY_HITS = []        # 被拦写点/删除副作用记录，收尾汇总用
+
 
 def fetch_minute_kline_eastmoney(code, period='60', days=30):
     """东方财富分钟K线API（主数据源）"""
@@ -226,6 +231,10 @@ def save_minute_data(code, df):
     """保存分钟K线到文件"""
     os.makedirs(MINUTE_DIR, exist_ok=True)
     filepath = os.path.join(MINUTE_DIR, f'{code}.csv')
+    if DRY:
+        print(f'[DRY-RUN] W1 would-write -> {filepath} ({len(df)} rows)')
+        DRY_HITS.append(('W1', filepath))
+        return filepath
     df.to_csv(filepath, index=False, encoding='utf-8-sig')
     return filepath
 
@@ -236,6 +245,55 @@ def load_minute_data(code):
     if os.path.exists(filepath):
         return pd.read_csv(filepath)
     return None
+
+
+def _write_fetch_outcomes(stats, total, failed_codes, success_rate):
+    """收尾副作用：降级标记写（W2）/删（W2'）＋状态 json 写（W3）。dry-run 下全部短路。"""
+    # 降级判断
+    if success_rate < MIN_SUCCESS_RATE * 100:
+        print(f"[MINUTE] ⚠️ Success rate {success_rate:.0f}% < {MIN_SUCCESS_RATE*100:.0f}% threshold")
+        print(f"[MINUTE] Graceful degradation: minute K-line disabled for this run")
+        print(f"[MINUTE] Position sizer will use gap-based alternative indicator")
+        # 写入降级标记
+        degrade_marker = os.path.join(DATA_DIR, '.minute_degraded')
+        if DRY:
+            print(f'[DRY-RUN] W2 would-write -> {degrade_marker} (marker)')
+            DRY_HITS.append(('W2', degrade_marker))
+        else:
+            degrade_info = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'success_rate': round(success_rate, 1),
+                'success': stats['success'],
+                'total': total,
+                'failed_codes': failed_codes[:10],
+            }
+            with open(degrade_marker, 'w', encoding='utf-8') as f:
+                json.dump(degrade_info, f, ensure_ascii=False)
+    else:
+        # 清除降级标记
+        degrade_marker = os.path.join(DATA_DIR, '.minute_degraded')
+        if os.path.exists(degrade_marker):
+            if DRY:
+                print(f"[DRY-RUN] W2' would-delete -> {degrade_marker}")
+                DRY_HITS.append(("W2'", degrade_marker))
+            else:
+                os.remove(degrade_marker)
+
+    # 保存获取状态
+    status_path = os.path.join(MINUTE_DIR, '_fetch_status.json')
+    if DRY:
+        print(f'[DRY-RUN] W3 would-write -> {status_path} (status json)')
+        DRY_HITS.append(('W3', status_path))
+        return
+    with open(status_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'success': stats['success'],
+            'total': total,
+            'success_rate': round(success_rate, 1),
+            'sources': {'eastmoney': stats['eastmoney'], 'sina': stats['sina'], '30m': stats['eastmoney_30m']},
+            'failed_codes': failed_codes,
+        }, f, ensure_ascii=False, indent=2)
 
 
 def fetch_all_hs300(max_stocks=50):
@@ -277,39 +335,8 @@ def fetch_all_hs300(max_stocks=50):
     print(f"[MINUTE] Done: {stats['success']}/{total} ({success_rate:.0f}%)")
     print(f"[MINUTE] Sources: eastmoney={stats['eastmoney']}, sina={stats['sina']}, 30m_fallback={stats['eastmoney_30m']}")
 
-    # 降级判断
-    if success_rate < MIN_SUCCESS_RATE * 100:
-        print(f"[MINUTE] ⚠️ Success rate {success_rate:.0f}% < {MIN_SUCCESS_RATE*100:.0f}% threshold")
-        print(f"[MINUTE] Graceful degradation: minute K-line disabled for this run")
-        print(f"[MINUTE] Position sizer will use gap-based alternative indicator")
-        # 写入降级标记
-        degrade_marker = os.path.join(DATA_DIR, '.minute_degraded')
-        degrade_info = {
-            'date': datetime.now().strftime('%Y-%m-%d'),
-            'success_rate': round(success_rate, 1),
-            'success': stats['success'],
-            'total': total,
-            'failed_codes': failed_codes[:10],
-        }
-        with open(degrade_marker, 'w', encoding='utf-8') as f:
-            json.dump(degrade_info, f, ensure_ascii=False)
-    else:
-        # 清除降级标记
-        degrade_marker = os.path.join(DATA_DIR, '.minute_degraded')
-        if os.path.exists(degrade_marker):
-            os.remove(degrade_marker)
-
-    # 保存获取状态
-    status_path = os.path.join(MINUTE_DIR, '_fetch_status.json')
-    with open(status_path, 'w', encoding='utf-8') as f:
-        json.dump({
-            'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'success': stats['success'],
-            'total': total,
-            'success_rate': round(success_rate, 1),
-            'sources': {'eastmoney': stats['eastmoney'], 'sina': stats['sina'], '30m': stats['eastmoney_30m']},
-            'failed_codes': failed_codes,
-        }, f, ensure_ascii=False, indent=2)
+    # 降级标记（W2/W2'）与状态写（W3）——dry-run 下全部短路
+    _write_fetch_outcomes(stats, total, failed_codes, success_rate)
 
     return results
 
@@ -345,14 +372,26 @@ def get_intraday_advice_for_orders(orders):
     return advices
 
 
-def main():
+def main(argv=None):
+    global DRY
+    import argparse
+    parser = argparse.ArgumentParser(description='分钟K线获取引擎 v2')
+    parser.add_argument('code', nargs='?', default=None, help='单只股票代码（缺省＝批量 HS300 前 50）')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='预演模式：网络请求照常，写文件/删标记/状态写全部短路，仅打印')
+    args = parser.parse_args(argv)
+    DRY = args.dry_run
+    DRY_HITS.clear()
+
     print(f"{'='*50}")
+    if DRY:
+        print("  [DRY-RUN] 分钟K线获取引擎预演（写点与删除副作用将短路）")
     print(f"  分钟K线获取引擎 v2 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  智能重试 | 双数据源 | 自动降级")
     print(f"{'='*50}")
 
-    if len(sys.argv) > 1:
-        code = sys.argv[1].zfill(6)
+    if args.code:
+        code = args.code.zfill(6)
         print(f"[MINUTE] Fetching single stock: {code}")
         source, df = fetch_minute_kline_with_retry(code, period='60', days=30)
         if df is not None:
@@ -394,6 +433,10 @@ def main():
         print(f"[HEALTH] Robustness score: 8/10 (acceptable, degraded)")
     else:
         print(f"[HEALTH] Robustness score: 7/10 (below target, consider Plan B)")
+
+    if DRY:
+        targets = '; '.join(f'{w}->{p}' for w, p in DRY_HITS) or '（无）'
+        print(f"[DRY-RUN] would-write: {len(DRY_HITS)} 个写点, 目标={targets}; 实际写盘 0 字节")
 
     return 0
 

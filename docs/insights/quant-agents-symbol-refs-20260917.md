@@ -5,7 +5,7 @@
 ```
 $ git grep -n run_self_check
 AGENTS.md:217:| 自检自愈 | `ops/health.py`（原 _self_check.py）+ `auto_heal.py` | 每日管道结束后自动自检（项数见 `ops/health.py` run_self_check 返回）→自动修复→日志记录 |
-docs/insights/quant-worktree-diff-attribution-20260917.md:60:+「自动自检（项数见 ops/health.py run_self_check 返回）」
+docs/insights/quant-worktree-diff-attribution-20260917.md（量化仓）:60:+「自动自检（项数见 ops/health.py run_self_check 返回）」
 ```
 
 → 代码内 **0 处**；文档命中 2 处＝AGENTS.md:217 原文＋a1-015 报告的引文（后者系本夜审计报告对原文的转录，非独立使用）。ops/health.py 实际入口＝`def run_all():`（:109），另有 check(:22)/warn(:30)/_scan_hardcoded_bark_token(:39)/is_non_trading_day(:52)。

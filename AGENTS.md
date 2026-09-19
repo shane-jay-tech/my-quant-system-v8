@@ -6,9 +6,9 @@
 
 ---
 
-## ⚡ 协作方法（v2 三模型）— 规则见根配置 D:\code\AGENTS.md
+## ⚡ 协作方法（v3 双通道，2026-09-13 精简）— 规则见根配置 D:\code\CLAUDE.md
 
-本项目的多模型协作规则统一由根配置决定（总指挥 DeepSeek V4 Pro + 快枪手 V4 Flash + 第二只手 ChatGPT 5.6，走本机 Codex CLI 直连），本文件不再维护协作配置副本，只保留量化项目专属的强制触发清单。
+本项目的多模型协作规则统一由根配置决定（**总指挥 + 第一执行手 = 官方 DeepSeek V4 Flash；评审官 / 第二方案 = 711ev 中转 GPT-5.6**）。2026-09-13 起官方 deepseek-v4-pro、百炼 DashScope、kimi、claude、官方 vision、万象均已退役，不要再调用。本文件不再维护协作配置副本，只保留量化项目专属的强制触发清单。
 
 ### 量化项目特殊放行（多模型必触发 → 对应根配置「双实现触发 / 升深档」）
 
@@ -214,7 +214,7 @@
 | 成本审计 | `cost_tracker.py` | LLM调用成本追踪+每日审计报告+仪表盘看板 |
 | 新手保护期 | `newbie_protection.py` | 3阶段保护(观察/模拟/预备)，自动阶段推进 |
 | 轻量进化 | `evolve_daily_light.py` | 每日参数微调(RSI±5/MA±2/仓位±5%)+安全锁 |
-| 自检自愈 | `ops/health.py`（原 _self_check.py）+ `auto_heal.py` | 每日管道结束后 147 项自检→自动修复→日志记录 |
+| 自检自愈 | `ops/health.py`（原 _self_check.py）+ `auto_heal.py` | 每日管道结束后自动自检（项数见 `ops/health.py` run_all 返回）→自动修复→日志记录 |
 | 首周手册 | `learning/first_week_guide.md` | 新手10天从观察到实盘的完整路径 |
 | 出场顾问 | `exit_advisor.py` | 5级出场条件(止损/止盈/到期/死叉/弱势)每日检查所有持仓 |
 | 选股追踪 | `track_performance.py` | 追踪每日选股次日表现，积累准确率数据 |
