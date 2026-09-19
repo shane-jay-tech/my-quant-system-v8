@@ -407,12 +407,89 @@ def final_dedupe():
         print(f"[WARN] Final dedupe failed: {e}（已保留原有数据，不会丢失）")
 
 
+def _resolve_increment_plan():
+    """只读盘上状态算出"本次要拉哪些股票"的增量计划（零网络、零写盘）。
+
+    `main()` 与 `--dry-run-plan`（q916-04 切片3）共用这一份算法：判定口径涉及
+    股票池回退、目标日期解析与 latest_by_code 分组，两处各写一遍迟早漂，漂一次就是漏拉或多拉一整天数据。
+    返回 None ＝ 连股票池文件都没有（main 侧原本就是 FATAL 退出）。
+    """
+    import glob
+    import re
+    today = datetime.now().strftime('%Y%m%d')
+    today_file = DATA_DIR / f'stock_{today}.csv'
+    used_fallback = False
+
+    if not os.path.exists(today_file):
+        files = sorted(glob.glob(str(DATA_DIR / 'stock_*.csv')), reverse=True)
+        if not files:
+            return None
+        today_file = files[0]
+        used_fallback = True
+
+    stock_df = pd.read_csv(today_file, dtype={'代码': str})
+    all_codes = list(dict.fromkeys(stock_df['代码'].tolist()))
+    pool_size = len(all_codes)
+    del stock_df        # 只要代码列，别把整张池表带到函数尾部
+
+    m = re.search(r'stock_(\d{8})\.csv', os.path.basename(str(today_file)))
+    if m:
+        y = m.group(1)
+        target_date_str = f'{y[0:4]}-{y[4:6]}-{y[6:8]}'
+    else:
+        target_date_str = datetime.now().strftime('%Y-%m-%d')
+
+    # 只保留 latest_by_code 字典，不整表驻留（Round-2 的 OOM 教训，见 main 原注释）
+    latest_by_code = {}
+    if os.path.exists(HISTORY_FILE):
+        try:
+            _tmp_full = pd.read_csv(HISTORY_FILE, dtype={'代码': str}, usecols=['代码', '日期'])
+            if not _tmp_full.empty:
+                latest_by_code = _tmp_full.groupby('代码')['日期'].max().to_dict()
+            del _tmp_full
+        except Exception as e:
+            print(f"[WARN] Failed to read existing history: {e}")
+
+    new_codes = [c for c in all_codes if c not in latest_by_code]
+    stale_codes = [c for c in all_codes
+                   if c in latest_by_code and latest_by_code[c] < target_date_str]
+    codes_to_fetch = list(dict.fromkeys(new_codes + stale_codes))   # 保序去重
+
+    return {
+        'pool_file': str(today_file), 'pool_size': pool_size,
+        'target_date': target_date_str, 'latest_by_code': latest_by_code,
+        'new_codes': new_codes, 'stale_codes': stale_codes,
+        'codes_to_fetch': codes_to_fetch, 'used_fallback': used_fallback,
+    }
+
+
+def describe_plan(plan: dict) -> None:
+    """把增量计划打成人类可读清单（--dry-run-plan 的全部输出；不碰网络、不落一个字节）。"""
+    todo = plan['codes_to_fetch']
+    print("[DRY-RUN-PLAN] 零网络 · 零写盘 —— 只读盘上状态得到的增量计划")
+    print(f"  股票池文件: {plan['pool_file']}（{plan['pool_size']} 只）"
+          + ("（当日文件缺失，回退用最新一份）" if plan['used_fallback'] else ""))
+    print(f"  目标日期  : {plan['target_date']}")
+    print(f"  待补代码  : {len(todo)} 只 = 全新 {len(plan['new_codes'])} + 落后 {len(plan['stale_codes'])}"
+          f"；跳过 {plan['pool_size'] - len(todo)} 只")
+    print(f"  目标文件  : {HISTORY_FILE}")
+    print("  写入方式  : 逐批 stream-append（save_increment mode='a'）＋ 收尾整体重写去重（final_dedupe）")
+    if todo:
+        print(f"  待补样例  : {', '.join(todo[:10])}" + (" …" if len(todo) > 10 else ""))
+
+
 def _parse_args(argv):
-    """q916-04 切片1：--dry-run 旗标（网络照常、写点短路）。默认行为与历史版本完全一致。"""
+    """q916-04 切片1：--dry-run 旗标（网络照常、写点短路）。默认行为与历史版本完全一致。
+
+    切片3（q918-19）另加 `--dry-run-plan`：连网络都不碰，只读盘上状态打一份增量计划就退出。
+    两个旗标互斥意义不同——`--dry-run` 会真拉数据（能看到数据源问题），`--dry-run-plan` 是纯本地预演。
+    """
     import argparse
     parser = argparse.ArgumentParser(description='历史日线数据下载器')
     parser.add_argument('--dry-run', action='store_true',
                         help='预演模式：网络请求照常，所有写点与备份副作用短路，仅打印 would-write')
+    parser.add_argument('--dry-run-plan', action='store_true',
+                        help='只读盘上状态打印增量计划（股票池/待补代码/目标文件/追加vs重写）后退出：零网络、零写盘')
     return parser.parse_args(argv)
 
 
@@ -421,6 +498,15 @@ def main(argv=None):
     args = _parse_args(argv)
     DRY = args.dry_run
     DRY_HITS.clear()
+
+    if args.dry_run_plan:
+        plan = _resolve_increment_plan()
+        if plan is None:
+            print("[FATAL] No stock data file found. Run fetch_stock_data.py first.")
+            return 1
+        describe_plan(plan)
+        return 0
+
     print(f"{'='*50}")
     if DRY:
         print("  [DRY-RUN] 历史数据下载器预演（写点将短路）")
@@ -430,69 +516,30 @@ def main(argv=None):
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Step 1: 获取需要下载的股票代码列表
-    # 从当日数据中读取所有 A 股代码
-    today = datetime.now().strftime('%Y%m%d')
-    today_file = DATA_DIR / f'stock_{today}.csv'
-
-    if not os.path.exists(today_file):
-        # 尝试找最新的 stock_*.csv
-        import glob
-        pattern = str(DATA_DIR / 'stock_*.csv')
-        files = sorted(glob.glob(pattern), reverse=True)
-        if not files:
-            print("[FATAL] No stock data file found. Run fetch_stock_data.py first.")
-            sys.exit(1)
-        today_file = files[0]
+    # Step 1+2: 增量计划——与 --dry-run-plan 共用 _resolve_increment_plan（不复制第二份判定口径）
+    plan = _resolve_increment_plan()
+    if plan is None:
+        print("[FATAL] No stock data file found. Run fetch_stock_data.py first.")
+        sys.exit(1)
+    today_file = plan['pool_file']
+    target_date_str = plan['target_date']
+    latest_by_code = plan['latest_by_code']
+    new_codes = plan['new_codes']
+    stale_codes = plan['stale_codes']
+    codes_to_fetch = plan['codes_to_fetch']
+    if plan['used_fallback']:
         print(f"[INFO] Using stock list from: {today_file}")
-
-    stock_df = pd.read_csv(today_file, dtype={'代码': str})
-    all_codes = stock_df['代码'].unique().tolist()
-    print(f"[INFO] {len(all_codes)} stocks to process")
-
-    # Step 2 (v8.5): 按"每只股票最新日期"判断增量——治本三件套
-    # ① 不再仅看"代码是否存在"；改为看"该股票最新日期 < 目标日期"
-    # ② 不再 os.rename 破坏性删除旧文件；走最终去重合并
-    # ③ Sina 拉失败时，旧数据完整保留——不会股票池缩水
-    import re
-    m = re.search(r'stock_(\d{8})\.csv', os.path.basename(today_file))
-    if m:
-        yyyymmdd = m.group(1)
-        target_date_str = f'{yyyymmdd[0:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}'
-    else:
-        target_date_str = datetime.now().strftime('%Y-%m-%d')
-
-    # 读取已有 history.csv，构建 {代码: 最新日期} 映射
-    # Round-2 修复（2026-05-30）：只保留 latest_by_code 字典，丢掉整张 existing_full DataFrame
-    # Why: 旧版在 main 末尾再次 read_csv(disk_df) 然后 concat([disk_df, existing_full]) → 同份数据
-    # 双倍驻留内存（4400 只 × 60 日 = 26 万行 × 2 = 50 多万行临时占用），4G 小机子直接 OOM。
-    # disk_df 已包含 existing_full 的所有原始记录（stream-append 是"追加"不是"替换"），所以最终
-    # 去重时不需要 existing_full——单一 disk_df 自带去重就够了。
-    latest_by_code = {}
-    if os.path.exists(HISTORY_FILE):
-        try:
-            _tmp_full = pd.read_csv(HISTORY_FILE, dtype={'代码': str}, usecols=['代码', '日期'])
-            if not _tmp_full.empty:
-                latest_by_code = _tmp_full.groupby('代码')['日期'].max().to_dict()
-            del _tmp_full   # 立刻释放，不留到 main 末尾
-        except Exception as e:
-            print(f"[WARN] Failed to read existing history: {e}")
-
-    # 需要拉的股票 = 全新 + 旧但日期落后
-    new_codes = [c for c in all_codes if c not in latest_by_code]
-    stale_codes = [c for c in all_codes
-                   if c in latest_by_code and latest_by_code[c] < target_date_str]
-    codes_to_fetch = list(dict.fromkeys(new_codes + stale_codes))   # 保序去重
+    print(f"[INFO] {plan['pool_size']} stocks to process")
 
     if len(codes_to_fetch) == 0:
-        print(f"[OK] History up-to-date (all {len(all_codes)} stocks ≥ {target_date_str})")
+        print(f"[OK] History up-to-date (all {plan['pool_size']} stocks ≥ {target_date_str})")
         return 0
 
     print(f"[INFO] Target date: {target_date_str}")
     print(f"[INFO] Need to fetch: {len(codes_to_fetch)} stocks")
     print(f"       new (no record): {len(new_codes)}")
     print(f"       stale (date < target): {len(stale_codes)}")
-    print(f"       up-to-date: {len(all_codes) - len(codes_to_fetch)} (skipped)")
+    print(f"       up-to-date: {plan['pool_size'] - len(codes_to_fetch)} (skipped)")
 
     # Step 3 (v8.6.1): 先试东财快路径 —— 一次请求覆盖「仅缺今日」的股票。
     # 失败/校验不过会自动回退，codes_to_fetch 剔除已覆盖部分。

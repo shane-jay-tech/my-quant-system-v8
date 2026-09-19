@@ -372,6 +372,35 @@ def get_intraday_advice_for_orders(orders):
     return advices
 
 
+def describe_plan(max_stocks=50):
+    """q916-04 切片3（q918-19）：只读盘上状态打一份增量计划就返回——零网络、零写盘。
+
+    股票池取自模块常量 `HS300_TOP50`（:25），**不联网取成分股**，所以这条路径可以完全离线；
+    存在性用 `os.path.exists` 判，不解析 csv（解析 50 个文件只为打个计划是浪费，也会把
+    "窗口内有多少根 bar"这种需要拉数据才知道的东西混进来）。
+    返回 (待补代码列表, 已存在只数) 供调用方/测试断言。
+    """
+    pool = [c.zfill(6) for c in HS300_TOP50[:max_stocks]]
+    missing, present = [], []
+    for code in pool:
+        path = os.path.join(MINUTE_DIR, f'{code}.csv')
+        (present if os.path.exists(path) else missing).append(code)
+
+    degrade_marker = os.path.join(DATA_DIR, '.minute_degraded')
+    status_path = os.path.join(MINUTE_DIR, '_fetch_status.json')
+
+    print("[DRY-RUN-PLAN] 零网络 · 零写盘 —— 只读盘上状态得到的增量计划")
+    print(f"  股票池    : HS300_TOP50 常量表前 {len(pool)} 只（不联网取成分股）")
+    print(f"  目标目录  : {MINUTE_DIR}")
+    print(f"  已存在    : {len(present)} 只")
+    print(f"  待补      : {len(missing)} 只 -> {', '.join(missing[:10])}"
+          + (" …" if len(missing) > 10 else ""))
+    print("  写入方式  : 每只股票**整文件覆写** to_csv（不是追加）⇒ 只保留本次窗口（默认 30 日 60 分钟）")
+    print(f"  收尾副作用: 降级标记 {'在盘' if os.path.exists(degrade_marker) else '不在盘'} -> {degrade_marker}")
+    print(f"              状态文件 {'在盘' if os.path.exists(status_path) else '不在盘'} -> {status_path}")
+    return missing, len(present)
+
+
 def main(argv=None):
     global DRY
     import argparse
@@ -379,9 +408,15 @@ def main(argv=None):
     parser.add_argument('code', nargs='?', default=None, help='单只股票代码（缺省＝批量 HS300 前 50）')
     parser.add_argument('--dry-run', action='store_true',
                         help='预演模式：网络请求照常，写文件/删标记/状态写全部短路，仅打印')
+    parser.add_argument('--dry-run-plan', action='store_true',
+                        help='只读盘上状态打印增量计划（池/待补/目标文件/覆写方式）后退出：零网络、零写盘')
     args = parser.parse_args(argv)
     DRY = args.dry_run
     DRY_HITS.clear()
+
+    if args.dry_run_plan:
+        describe_plan()
+        return 0
 
     print(f"{'='*50}")
     if DRY:
