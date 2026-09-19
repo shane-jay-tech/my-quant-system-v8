@@ -347,6 +347,8 @@ sim_trade.py 每周自动比对 real_trades.csv 与系统推荐订单：
 
 # 系统架构 v7（仅作历史参考，v8 不再使用）
 
+> 注：上节为 v7 历史架构（16 段）。v8 现状见下方注册表口径（44 条目，core/pipeline.py:PIPELINE_STEPS）。
+
 ## 核心模块（16步完整流水线，0-15）
 
 ```
@@ -409,7 +411,7 @@ sim_trade.py 每周自动比对 real_trades.csv 与系统推荐订单：
 - Windows Task Scheduler:
   - 每个交易日 **09:15** 触发 `morning_pipeline.bat`（盘前情绪评分+推送；**该任务需手动注册**，注册命令见 `ops/health.py` 的 morning task 提示）
   - 每个交易日 **15:37** 触发 `daily_pipeline.bat`（日终流水线，实际任务名为 QuantDailyPipeline_v5）
-- 24步日终流水线（0-24）：数据→数据层(基本面)→选股(含基本面过滤)→多策略→回测(分档成本)→因子分析(周一)→分钟K线→仓位→模拟交易→组合风控→反馈闭环→研究→追踪→内化→心理→新手指令卡→推送→自检自愈→Walk-Forward(周三)→蒙特卡洛(月末)→策略竞技(周五)→每周任务
+- 日终流水线：v8 起为 core/pipeline.py:PIPELINE_STEPS 注册表驱动（44 条目：daily 35／month-end 3／monday 2／friday 2／wednesday 1／thursday 1，按 tier 与 schedule 自动过滤）。下述 22 段为链路叙事，段≠条目；链内未叙及的 12 个 daily key＝exit_advisor、evolve_daily_light、llm_analyst、broker_export、cost_tracker、portfolio_sync、behavior_log、digest、decision_replay、goal_metrics、newbie_protection、archive（均已注册运行，仅叙述未列）。
 - 3步盘前流水线：交易日检测→情绪评分→仓位建议推送
 - 新手模式：`.newbie_mode` 存在时→生成指令卡 + simple推送
 - 安全锁：连续2次进化退化自动暂停
