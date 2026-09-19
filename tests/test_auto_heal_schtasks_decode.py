@@ -66,10 +66,15 @@ def test_recorded_kwargs_decode_real_cp936_bytes_without_mangling(spy, tmp_path)
     assert kw.get("errors") == "replace", "防御被摘掉，后面的解码对比就没有意义了"
     gbk_bytes = "中文标记OK".encode("gbk")
 
-    # subprocess text=True 的真实语义：encoding=None ⇒ locale 首选编码（bytes.decode 本身不收 None）
+    # subprocess text=True 的真实语义：encoding=None ⇒ locale 首选编码（bytes.decode 本身不收 None）。
+    # 本修复锁的契约是「不抛」＋errors=replace（读线程崩＝自愈失效）；逐字还原则取决于机器
+    # locale：中文 ANSI（cp936）下完整还原；PYTHONUTF8=1 时 preferred=utf-8，gbk 字节会被
+    # replace 成 U+FFFD（乱码但不崩，与生产行为同源）——两种模式都必须绿，故按编码分档断言。
     enc = kw.get("encoding") or locale.getpreferredencoding(False)
-    decoded = gbk_bytes.decode(enc, kw.get("errors") or "strict")
-    assert "中文标记OK" in decoded                                     # 与子进程同源 ⇒ 中文逐字还原
+    decoded = gbk_bytes.decode(enc, kw.get("errors") or "strict")   # 契约核心：不抛
+    assert "OK" in decoded                                          # ASCII 在任何 sane 编码下存活
+    if enc.replace("-", "").lower() in ("cp936", "gbk", "gb2312"):
+        assert "中文标记OK" in decoded                               # 与子进程同源时中文逐字还原
     with pytest.raises(UnicodeDecodeError):
         gbk_bytes.decode("utf-8")                                     # 病灶：严格 UTF-8 必炸
     assert "中文" not in gbk_bytes.decode("utf-8", "replace")           # 反证：utf-8+replace 把中文换没了
