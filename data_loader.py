@@ -283,15 +283,15 @@ def load_market_sentiment():
         df_zdt = ak.stock_zt_pool_em(date=datetime.now().strftime('%Y%m%d'))
         if df_zdt is not None:
             result['涨停家数'] = len(df_zdt)
-    except Exception:
-        pass
+    except Exception as _exc:
+        print(f'[DATA] sentiment: 涨停家数 unavailable ({type(_exc).__name__}: {_exc})', flush=True)
 
     try:
         df_dt = ak.stock_zt_pool_dtgc_em(date=datetime.now().strftime('%Y%m%d'))
         if df_dt is not None:
             result['跌停家数'] = len(df_dt)
-    except Exception:
-        pass
+    except Exception as _exc:
+        print(f'[DATA] sentiment: 跌停家数 unavailable ({type(_exc).__name__}: {_exc})', flush=True)
 
     try:
         # 涨跌分布
@@ -299,8 +299,8 @@ def load_market_sentiment():
         if df_zdfbx is not None and '上涨家数' in df_zdfbx.columns:
             result['上涨家数'] = int(df_zdfbx['上涨家数'].iloc[0]) if len(df_zdfbx) > 0 else 0
             result['下跌家数'] = int(df_zdfbx['下跌家数'].iloc[0]) if len(df_zdfbx) > 0 else 0
-    except Exception:
-        pass
+    except Exception as _exc:
+        print(f'[DATA] sentiment: 涨跌分布 unavailable ({type(_exc).__name__}: {_exc})', flush=True)
 
     # HS300 波动率（从本地数据计算）
     hs300_path = os.path.join(DATA_DIR, 'hs300_index.csv')
@@ -312,8 +312,8 @@ def load_market_sentiment():
             if len(df_hs) >= 20:
                 ret = df_hs['收盘'].pct_change().dropna()
                 result['hs300_vol20'] = round(ret.tail(20).std() * np.sqrt(252) * 100, 2)
-        except Exception:
-            pass
+        except Exception as _exc:
+            print(f'[DATA] sentiment: hs300_vol20 unavailable ({type(_exc).__name__}: {_exc})', flush=True)
 
     print(f'[DATA] Sentiment: {result}')
     return result

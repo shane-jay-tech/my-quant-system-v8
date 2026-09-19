@@ -46,7 +46,7 @@ def recreate_default_json(path, defaults):
             shutil.copy2(path, bak)
             log('INFO', f'Backed up before recreate: {os.path.basename(bak)}')
         except OSError:
-            pass
+            log('WARN', 'Backup before recreate failed')
     atomic_write_json(path, defaults)
     return os.path.exists(path)
 
