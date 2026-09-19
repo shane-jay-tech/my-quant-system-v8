@@ -33,7 +33,10 @@ def _notify_failure(reason: str):
         import subprocess
         subprocess.run([sys.executable, os.path.join(BASE_DIR, 'send_to_bark.py'),
                         '--file', msg_file, '--no-digest'],
-                       cwd=BASE_DIR, timeout=60)
+                       cwd=BASE_DIR, timeout=60,
+                       # q918-39：此处不捕获输出，参数当下无行为影响；只求与 ops/health.py(cb62427) 同口径，
+                       # 将来若加 capture_output，errors='replace' 保证读线程不被解码异常炸掉
+                       encoding='utf-8', errors='replace')
     except Exception as exc:
         print(f"[PIPELINE] failure notify failed (non-fatal): {exc}", flush=True)
 
