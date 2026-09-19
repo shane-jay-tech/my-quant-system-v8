@@ -767,7 +767,7 @@ def calc_execution_quality():
         import pandas as pd
         real = pd.read_csv(real_file, dtype={'代码': str})
         if '备注' in real.columns:
-            real = real[~real['备注'].str.contains('示例数据', na=False)]
+            real = real[~real['备注'].fillna('').astype(str).str.contains('示例数据', na=False)]
         if len(real) == 0:
             return None
     except Exception:

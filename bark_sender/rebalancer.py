@@ -29,7 +29,7 @@ def _lookup_position_shares(code):
             import pandas as pd
             df = pd.read_csv(real_path, dtype={'代码': str})
             if '备注' in df.columns:
-                df = df[~df['备注'].str.contains('示例', na=False)]
+                df = df[~df['备注'].fillna('').astype(str).str.contains('示例', na=False)]
             for c, group in df.groupby('代码'):
                 if c.zfill(6) == code.zfill(6):
                     buys = group[group['方向'] == '买入']['数量'].sum()

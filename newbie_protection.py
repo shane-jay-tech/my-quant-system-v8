@@ -333,7 +333,7 @@ def _count_real_trades():
         import pandas as pd
         df = pd.read_csv(real_file, dtype={'代码': str})
         if '备注' in df.columns:
-            df = df[~df['备注'].str.contains('示例', na=False)]
+            df = df[~df['备注'].fillna('').astype(str).str.contains('示例', na=False)]
         return len(df)
     except Exception:
         return 0
@@ -348,7 +348,7 @@ def _evaluate_discipline():
         import pandas as pd
         df = pd.read_csv(real_file, dtype={'代码': str})
         if '备注' in df.columns:
-            df = df[~df['备注'].str.contains('示例', na=False)]
+            df = df[~df['备注'].fillna('').astype(str).str.contains('示例', na=False)]
         if len(df) < 2:
             return 0
 
@@ -366,7 +366,7 @@ def _evaluate_discipline():
 
         # 检查备注中是否有纪律违规标记
         if '备注' in recent.columns:
-            violations = recent['备注'].str.contains('违规|冲动|追高|情绪', na=False).sum()
+            violations = recent['备注'].fillna('').astype(str).str.contains('违规|冲动|追高|情绪', na=False).sum()
             score -= violations * 5
 
         return max(0, min(25, score))
