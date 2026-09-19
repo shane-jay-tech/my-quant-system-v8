@@ -5,12 +5,17 @@
 - 集合外工作日 → False；集合内工作日 → True（正向路径一并冻结）；
 - 日历不可用（get_trading_days → None）→ None（调用方走启发式兜底契约）；
 - 字符串入参走 str(day)[:10] 分支。
-零网络：get_trading_days 整体 monkeypatch，_refresh/akshare 永不触网。
+零网络：get_trading_days 整体 monkeypatch，_refresh/akshare 永不触网；
+刷新分支（q918-03，S5 F-4）经 sys.modules 注入假 akshare 冻结 None/空表/缺列/正常四形态与缓存落盘。
 """
 
 from __future__ import annotations
 
+import sys
+import types
 from datetime import date
+
+import pandas as pd
 
 import utils.trading_calendar as tc
 
@@ -54,3 +59,56 @@ def test_string_input_uses_first_ten_chars(monkeypatch):
     _patch_days(monkeypatch)
     assert tc.is_trading_day_by_calendar("2026-09-21T15:00:00", "d") is True
     assert tc.is_trading_day_by_calendar("2026-09-20", "d") is False
+
+
+# ---------- 刷新失败分支（q918-03，S5 F-4：utils/trading_calendar.py:37-40 三分支无测试） ----------
+
+
+def _inject_akshare(monkeypatch, ret):
+    """sys.modules 注入假 akshare，tool_trade_date_hist_sina 返回 ret（绝不触网）。"""
+    fake = types.ModuleType("akshare")
+    fake.tool_trade_date_hist_sina = lambda: ret
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+
+
+def test_refresh_none_calendar_returns_none(tmp_path, monkeypatch):
+    """akshare 返回 None → get_trading_days 返回 None，且不落缓存。"""
+    _inject_akshare(monkeypatch, None)
+    assert tc.get_trading_days(str(tmp_path)) is None
+    assert not (tmp_path / tc.CACHE_NAME).exists()
+
+
+def test_refresh_empty_df_returns_none(tmp_path, monkeypatch):
+    """akshare 返回空表 → None，不落缓存。"""
+    _inject_akshare(monkeypatch, pd.DataFrame())
+    assert tc.get_trading_days(str(tmp_path)) is None
+    assert not (tmp_path / tc.CACHE_NAME).exists()
+
+
+def test_refresh_missing_column_returns_none(tmp_path, monkeypatch):
+    """akshare 返回缺 trade_date 列的表 → None，不落缓存。"""
+    _inject_akshare(monkeypatch, pd.DataFrame({"x": [1, 2]}))
+    assert tc.get_trading_days(str(tmp_path)) is None
+    assert not (tmp_path / tc.CACHE_NAME).exists()
+
+
+def test_refresh_normal_df_returns_days_and_writes_cache(tmp_path, monkeypatch):
+    """正常表 → 返回日期集合，且原子落盘 trading_calendar.csv（tmp→replace）。"""
+    _inject_akshare(monkeypatch, pd.DataFrame({"trade_date": ["2026-09-21", "2026-09-23"]}))
+    days = tc.get_trading_days(str(tmp_path))
+    assert days == {"2026-09-21", "2026-09-23"}
+    assert (tmp_path / tc.CACHE_NAME).exists()
+    assert not (tmp_path / (tc.CACHE_NAME + ".tmp")).exists()  # 原子替换后无残留
+
+
+def test_cache_hit_skips_refresh(tmp_path, monkeypatch):
+    """缓存优先契约：缓存可读时根本不调 akshare（假模块一旦被调即炸）。"""
+    pd.DataFrame({"trade_date": ["2026-09-21"]}).to_csv(tmp_path / tc.CACHE_NAME, index=False, encoding="utf-8-sig")
+    fake = types.ModuleType("akshare")
+
+    def _must_not_be_called():
+        raise AssertionError("缓存命中时不应触网刷新")
+
+    fake.tool_trade_date_hist_sina = _must_not_be_called
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    assert tc.get_trading_days(str(tmp_path)) == {"2026-09-21"}
