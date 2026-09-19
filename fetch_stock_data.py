@@ -326,8 +326,42 @@ def fetch_10jqka():
 
 
 # ========== 主流程：多源自动切换 ==========
-def main():
+
+# ========== dry-run 保护（q918-20；模板＝q916-04 切片1，见 fetch_minute_kline.py 同款）==========
+# 契约：网络拉取照常；W1（当日快照 CSV）短路并打印 would-write；不带旗标时行为逐字不变。
+DRY = False
+DRY_HITS = []        # 被拦写点记录，收尾汇总用
+
+
+def save_stock_snapshot(df, today, output_dir=None):
+    """写当日全市场快照 CSV，返回目标路径。
+
+    dry-run 下不建目录、不落盘，但仍返回路径——调用方（含 `[DONE]` 汇总）照常用它做展示。
+    """
+    out_dir = str(output_dir) if output_dir else str(DATA_DIR)
+    output_path = os.path.join(out_dir, f'stock_{today}.csv')
+    if DRY:
+        print(f'[DRY-RUN] W1 would-write -> {output_path} ({len(df)} rows)')
+        DRY_HITS.append(('W1', output_path))
+        return output_path
+    os.makedirs(out_dir, exist_ok=True)
+    df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    return output_path
+
+
+def main(argv=None):
+    global DRY
+    import argparse
+    parser = argparse.ArgumentParser(description='A股当日行情爬虫（多源自愈）')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='预演模式：网络请求照常，当日快照 CSV 短路，仅打印 would-write')
+    args = parser.parse_args(argv)
+    DRY = args.dry_run
+    DRY_HITS.clear()
+
     print(f"{'='*50}")
+    if DRY:
+        print("  [DRY-RUN] 快照写点将短路（网络拉取照常）")
     print(f"  A股行情爬虫启动 @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}")
 
@@ -364,16 +398,17 @@ def main():
     df = df.drop_duplicates(subset=['代码'], keep='first')
     df = df.sort_values('代码').reset_index(drop=True)
 
-    output_dir = DATA_DIR
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = output_dir / f'stock_{today}.csv'
-    df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    output_path = save_stock_snapshot(df, today)
 
     print(f"\n{'='*50}")
-    print(f"  [DONE] {len(df)} stocks saved to {output_path}")
+    print(f"  [DONE] {len(df)} stocks {'would save to' if DRY else 'saved to'} {output_path}")
     print(f"  数据范围：{df['代码'].iloc[0]} ~ {df['代码'].iloc[-1]}")
     print(f"  涨跌幅范围：{df['涨跌幅'].min():.2f}% ~ {df['涨跌幅'].max():.2f}%")
     print(f"{'='*50}")
+
+    if DRY:
+        targets = '; '.join(f'{w}->{p}' for w, p in DRY_HITS) or '（无）'
+        print(f"[DRY-RUN] would-write: {len(DRY_HITS)} 个写点, 目标={targets}; 实际写盘 0 字节")
 
     return 0
 

@@ -29,6 +29,11 @@ import requests
 from core.paths import DATA_DIR as DEFAULT_DATA_DIR  # S4-b 路径收敛：仓根/data 唯一来源
 INDEX_FILE = "hs300_index.csv"
 
+# ========== dry-run 保护（q918-20；模板＝q916-04 切片1，见 fetch_minute_kline.py 同款）==========
+# 契约：网络拉取与合并计算照常；W1（hs300_index.csv 的原子替换）短路并打印 would-write。
+DRY = False
+DRY_HITS = []        # 被拦写点记录，收尾汇总用
+
 _SINA_URL = (
     "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
     "CN_MarketData.getKLineData"
@@ -112,7 +117,8 @@ def update_hs300_index(data_dir: str | None = None) -> bool:
     成功返回 True；网络/解析/合并失败返回 False，且**绝不覆盖或清空现有文件**。
     """
     d = data_dir or DEFAULT_DATA_DIR
-    os.makedirs(d, exist_ok=True)
+    if not DRY:
+        os.makedirs(d, exist_ok=True)
     path = os.path.join(d, INDEX_FILE)
 
     recs = _fetch_sina_hs300()
@@ -142,6 +148,12 @@ def update_hs300_index(data_dir: str | None = None) -> bool:
 
     # 原子写：先写临时文件再替换，避免中途崩溃损坏 csv
     tmp = path + ".tmp"
+    if DRY:
+        print(f'[DRY-RUN] W1 would-write -> {path} ({len(merged)} rows, 经 {os.path.basename(tmp)} 原子替换)')
+        DRY_HITS.append(('W1', path))
+        targets = '; '.join(f'{w}->{p}' for w, p in DRY_HITS) or '（无）'
+        print(f"[DRY-RUN] would-write: {len(DRY_HITS)} 个写点, 目标={targets}; 实际写盘 0 字节")
+        return True
     try:
         merged.to_csv(tmp, index=False, encoding="utf-8-sig")
         os.replace(tmp, path)
@@ -161,13 +173,23 @@ def update_hs300_index(data_dir: str | None = None) -> bool:
     return True
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    global DRY
     # Windows cmd 默认 GBK，强制 UTF-8 避免日志乱码
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
         except Exception:
             pass
+    import argparse
+    parser = argparse.ArgumentParser(description='沪深300 日线指数抓取（合并写入，不覆盖历史）')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='预演模式：网络拉取与合并照常，hs300_index.csv 的原子替换短路，仅打印 would-write')
+    args = parser.parse_args(argv)
+    DRY = args.dry_run
+    DRY_HITS.clear()
+    if DRY:
+        print("  [DRY-RUN] 指数快照写点将短路（网络拉取与合并照常）")
     ok = update_hs300_index()
     return 0 if ok else 1
 
