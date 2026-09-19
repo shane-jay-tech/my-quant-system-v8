@@ -107,3 +107,35 @@ def test_get_pick_scores_skips_short_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(parsers, "RESULTS_DIR", str(tmp_path), raising=False)
     scores = parsers._get_pick_scores()
     assert scores == {"000001": 77}
+
+
+# ---------- 买入行畸形金额容错冻结（q918-05，S5 B-2：parsers.py:192 现行为未冻结） ----------
+
+
+def _buys_from_orders(tmp_path, monkeypatch, row):
+    d = tmp_path / "o"
+    d.mkdir()
+    (d / "daily_orders_20260912.md").write_text(
+        "## 今日买入订单（建议持有10天）\n" + row + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(parsers, "ORDERS_DIR", str(d), raising=False)
+    return parsers._parse_daily_orders_buys()
+
+
+def test_buy_row_nonnumeric_price_raises_valueerror(tmp_path, monkeypatch):
+    """冻结现行为：价格 'abc' → float() ValueError 向上传播（无容错）。"""
+    with pytest.raises(ValueError):
+        _buys_from_orders(tmp_path, monkeypatch, "| 600000 | 浦发银行 | 买入 | abc | 100 | 1000.0 | 已提交 |")
+
+
+def test_buy_row_negative_price_accepted_as_is(tmp_path, monkeypatch):
+    """冻结现行为：负价格 '-100' 不校验符号，原样解析为 -100.0 入清单。"""
+    buys = _buys_from_orders(tmp_path, monkeypatch, "| 600000 | 浦发银行 | 买入 | -100 | 100 | -10000.0 | 已提交 |")
+    assert [b["code"] for b in buys] == ["600000"]
+    assert buys[0]["price"] == -100.0 and buys[0]["amount"] == -10000.0
+
+
+def test_buy_row_six_columns_skipped(tmp_path, monkeypatch):
+    """冻结现行为：6 列短行（缺一列）被 len(parts)>=7 守卫整行跳过，不抛不收。"""
+    buys = _buys_from_orders(tmp_path, monkeypatch, "| 600000 | 浦发银行 | 买入 | 10.00 | 100 | 1000.0 |")
+    assert buys == []
