@@ -79,3 +79,64 @@ def test_phase_banner_and_tip_nonempty(np_env):
     # 现状：tip 返回 {'title','body'} dict
     tip = np_mod.get_phase_psychology_tip()
     assert isinstance(tip, dict) and tip.get('title') and tip.get('body')
+
+
+# ---------- 升级链负例/边界 characterization（q918-04，S5 F-5：:97-101/:162-166/:472-486 分支） ----------
+
+
+def _write_status_raw(status_file, extra):
+    import json
+
+    status = {
+        'first_start_date': '2026-09-14',
+        'current_phase': 'observation',
+        'day_number': 1,
+        'phase_start_date': '2026-09-14',
+        'daily_pnl_history': [],
+    }
+    status.update(extra)
+    status_file.write_text(json.dumps(status, ensure_ascii=False), encoding='utf-8')
+
+
+def _force_ready(monkeypatch):
+    """令 check_readiness 稳定 ready（study25+trades25+discipline25，无资金/统计数值断言）。"""
+    monkeypatch.setattr(np_mod, '_count_recent_diaries', lambda days=7: 3)
+    monkeypatch.setattr(np_mod, '_count_recent_learning_visits', lambda days=7: 0)
+    monkeypatch.setattr(np_mod, '_count_real_trades', lambda: 2)
+    monkeypatch.setattr(np_mod, '_evaluate_discipline', lambda: 25)
+
+
+def test_readiness_suggestions_3_becomes_passive(np_env, monkeypatch):
+    """连续建议计数：upgrade_suggestions=2 时再 ready → 第3次 → upgrade_type='passive'（:474）。"""
+    _force_ready(monkeypatch)
+    _write_status_raw(np_env, {'upgrade_suggestions': 2})
+    result = np_mod.check_readiness()
+    assert result['upgrade_type'] == 'passive'
+    saved = np_mod.init_newbie_status()
+    assert saved['upgrade_suggestions'] == 3
+
+
+def test_readiness_active_then_apply_upgrade(np_env, monkeypatch):
+    """ready+active 链：suggestions=0 首次 ready → 'active'（等确认）；apply_upgrade() 推进阶段
+    并复位计数、升级类型记 active、清 ready_request（:162-166 契约的另一侧）。"""
+    _force_ready(monkeypatch)
+    _write_status_raw(np_env, {'upgrade_suggestions': 0, 'ready_request_date': '2026-09-14T10:00:00'})
+    result = np_mod.check_readiness()
+    assert result['upgrade_type'] == 'active'
+
+    new_phase = np_mod.apply_upgrade()
+    assert new_phase == 'simulation'
+    saved = np_mod.init_newbie_status()
+    assert saved['current_phase'] == 'simulation'
+    assert saved['upgrade_suggestions'] == 0
+    assert saved['upgrade_type'] == 'active'
+    assert 'ready_request_date' not in saved
+
+
+def test_banner_unknown_upgrade_type_has_no_suffix(np_env):
+    """upgrade_type 未知值 → 横幅无「[系统自动推进]/[你主动迈出了这一步！]」后缀（:162-166 else 分支）。"""
+    _write_status_raw(np_env, {'current_phase': 'simulation', 'day_number': 5, 'upgrade_type': 'mystery'})
+    banner = np_mod.get_phase_banner()
+    assert isinstance(banner, str) and banner
+    assert '[系统自动推进]' not in banner
+    assert '[你主动迈出了这一步！]' not in banner
