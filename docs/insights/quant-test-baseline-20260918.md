@@ -64,7 +64,7 @@ TOTAL                        1321    191    86%
   按根配置属"改/测 buy-sell 决策"级，补测前需先解禁"资金数值断言"或由人工确认口径（沿用 2026-09-05 盘点与
   `h912-04-quant-cov-batch-a-20260912.md:46` 的同一判断，本快照不改这个结论）。
 - `bark_sender/config.py` 74%、`builders/formatters` 91% 属可自然补齐的一档。
-  `config.py` 那 5 条未覆盖全部落在 `_load_bark_tokens()`（`:24-31`）的分支里——
+  `config.py` 那 5 条未覆盖全部落在 `_load_bark_tokens()`（def 在 `:22`，体到 `:31`）的分支里——
   该函数在 `:34` 于 **import 期只跑一次**，一次测试会话只会命中其中一条路径，其余分支结构性不可达。
   补齐方式很干净：monkeypatch `core.secrets.get_secret_list/get_secret` 的返回值后 `importlib.reload(bark_sender.config)`，
   **不需要读真实 `data/secrets.json`**（凭据域零触碰）。
