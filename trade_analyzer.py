@@ -14,6 +14,9 @@ def _load_real_trades(base_dir):
         return None, 0
     df = pd.read_csv(real_file, dtype={'代码': str})
     if '备注' in df.columns:
+        # q918-13：备注整列空被 read_csv 读成 float64，.str 访问器抛 AttributeError；
+        # fillna('').astype(str) 守卫（样板=bark_sender/formatters.py:262），零决策数值改动。
+        df['备注'] = df['备注'].fillna('').astype(str)
         df = df[~df['备注'].str.contains('示例数据', na=False)]
     return df, len(df)
 
