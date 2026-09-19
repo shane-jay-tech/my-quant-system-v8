@@ -58,7 +58,7 @@ def run_script(script_name, timeout=120):
     try:
         r = subprocess.run(
             [sys.executable, script_path],
-            cwd=BASE, capture_output=True, text=True, timeout=timeout
+            cwd=BASE, capture_output=True, text=True, errors='replace', timeout=timeout
         )
         # 折叠为单行——防止子进程的换行/进度条污染 heal_log
         return r.returncode == 0, _flatten(r.stdout + r.stderr, max_len=200)
@@ -118,8 +118,12 @@ def fix_missing_evolve_state():
 
 def fix_scheduled_task(task_name, bat_path, desc):
     """重建 Windows 计划任务"""
+    # q918-18（镜像 cb62427 的解码防御，但只补 errors='replace' 不写 encoding）：
+    # 崩溃来自"严格解码"，补 errors 就够了；实测中文 Windows 下子进程/schtasks 都发 cp936 字节
+    # （`print("中文")` → b'\\xd6\\xd0\\xce\\xc4'，utf-8 严格解码当场 UnicodeDecodeError），
+    # 若照抄 encoding='utf-8' 反而会把中文日志整片替换成 U+FFFD。让 encoding 跟随 locale 才与子进程同源。
     r = subprocess.run(['schtasks', '/query', '/tn', task_name, '/fo', 'CSV'],
-                      capture_output=True, text=True, timeout=10)
+                      capture_output=True, text=True, errors='replace', timeout=10)
     if task_name in r.stdout:
         log('INFO', f'Scheduled task already exists: {task_name}')
         return True
@@ -134,7 +138,7 @@ def fix_scheduled_task(task_name, bat_path, desc):
         cmd = ['schtasks', '/create', '/tn', task_name, '/tr', bat_path, '/sc', 'WEEKLY', '/d', 'SUN', '/st', '10:00', '/f']
 
     # v8.7 安全修复：shell=False + 参数列表，避免命令注入面
-    r = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=15)
+    r = subprocess.run(cmd, shell=False, capture_output=True, text=True, errors='replace', timeout=15)
     success = r.returncode == 0
     if not success:
         log('WARN', f'schtasks create failed: {r.stderr[:200]}')
