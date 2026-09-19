@@ -94,7 +94,7 @@ core/pipeline.py:85        "evolve_strategy": {args: ["--auto"], schedule: "thur
 |---|---|---|---|
 | S1 | 把 W7 备份名改成带时分秒＋冲突即拒绝 | W7 | 同日连跑两次采纳 ⇒ 两个不同备份文件，第二个不覆写第一个 |
 | S2 | `cfg_get('evolve.dry_run_only', True)` ＋ `--dry-run/--apply` 接入 `main()`，默认 dry-run | 全部 | 无 flag 直跑 ⇒ 9 个写点零落盘（用 `git status --porcelain` 与 `ls reports/` 双向证明） |
-| S3 | 写点级 stub：把 9 条写语句收进一个 `_emit(kind, target, payload)` 出口 | W1-W9 | `grep -c "open(.*, .w." evolve_strategy.py` 由 5 降为 0（写只剩 helper）；`grep -c 'shutil.copy'` 同理 |
+| S3 | 写点级 stub：把 9 条写语句收进一个 `_emit(kind, target, payload)` 出口 | W1-W9 | `grep -cE "open\([^,]+, *['"]w['"]" evolve_strategy.py` 由 4 降为 0（4 处 = W2/W5/W6/W9；写只剩 helper）；`grep -c 'shutil.copy'` 同理 |
 | S4 | `utils/file_io.atomic_write_text`（现只有 json 版）＋ W2/W5/W9 改用它 | W2/W5/W9 | 中途 kill 测试：目标文件要么是旧的要么是新的，不得出现半截 |
 | S5 | `re.sub` 命中数断言（命中 0 视为异常，拒绝写 W6） | W6 | 构造一个常量写法变形的样例 ⇒ 不写文件且退出码非 0 |
 | S6 | W3/W8 追加去重（同日同描述） | W3/W8 | 连跑两次 ⇒ memory.md 只多一行 |
