@@ -125,3 +125,40 @@ def test_personalized_section_missing_and_broken_csv_return_empty(tmp_path, monk
     assert formatters.build_personalized_section() == []
     (tmp_path / "real_trades.csv").write_bytes(b"\xff\xfe broken,csv\n\x00\x01")
     assert formatters.build_personalized_section() == []
+
+
+# ---- 数值边界现值冻结（q918-12，基线 #5 收尾：-0.0/1e12/None/空串） ----
+
+def test_explain_negative_zero_change_takes_small_gain_branch():
+    """冻结现行为：change='-0.0%' → float 后为 -0.0，Python 中 -0.0 >= 0 成立，
+    落「小幅推进，蓄力充分」分支（负零不做特殊处理）。"""
+    out = formatters.explain_stock_detailed({"name": "甲", "change": "-0.0%", "score": 60})
+    assert "小幅推进，蓄力充分" in out
+    assert "（-0.0%，60分）" in out
+
+
+def test_explain_huge_numbers_keep_literal_and_take_bullish_branches():
+    """冻结现行为：1e12 量级字符串 float() 正常解析、原文照拼进文案，
+    走多头排列＋强势突破分支。"""
+    out = formatters.explain_stock_detailed({
+        "name": "巨", "change": "+1e12%", "score": 90,
+        "price": "1e12", "ma5": "1e11", "ma20": "1e10",
+    })
+    assert "均线呈多头排列（MA5=1e11 > MA20=1e10）" in out
+    assert "强势突破形态" in out
+    assert "1e12" in out  # 原始字符串直接内插，不做千分位/科学计数改写
+
+
+def test_explain_change_none_silently_skips_and_falls_back():
+    """冻结现行为：change=None → .replace 直接 AttributeError → except 吞掉，
+    无涨跌点、不崩；无其他点时走评分兜底行。"""
+    out = formatters.explain_stock_detailed({"name": "乙", "change": None, "score": 55})
+    assert out == "乙 评分55分，综合技术面表现靠前"
+    assert "今日涨幅" not in out
+
+
+def test_explain_change_empty_string_silently_skips():
+    """冻结现行为：change='' → float('') ValueError → except 吞掉，不崩不产涨跌点。"""
+    out = formatters.explain_stock_detailed({"name": "丙", "change": "", "score": 70, "rsi": "50"})
+    assert "今日涨幅" not in out
+    assert "黄金区间" in out  # 其余字段解析不受牵连
