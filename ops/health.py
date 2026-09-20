@@ -259,8 +259,10 @@ def run_all():
             found = False
             for task_name in aliases:
                 try:
-                    # n916d-16 同族解码防御：schtasks 输出为 GBK，UTF-8 模式下 text=True 读线程会炸
-                    r = subprocess.run(['schtasks', '/query', '/tn', task_name, '/fo', 'CSV'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
+                    # n916d-16 同族解码防御：schtasks 输出为 GBK，UTF-8 模式下 text=True 读线程会炸。
+                    # q920-11 收敛：按 q918-18 §三/§六.1 结论去掉 encoding='utf-8'（errors-only）——
+                    # 让编码跟随 locale 才与子进程同源；强指 utf-8 会把本可正确还原的中文整片换成 U+FFFD。
+                    r = subprocess.run(['schtasks', '/query', '/tn', task_name, '/fo', 'CSV'], capture_output=True, text=True, errors='replace', timeout=10)
                     if r.returncode == 0 and task_name in r.stdout:
                         found = True
                         break
@@ -269,7 +271,8 @@ def run_all():
             check(f'External: {desc} task', 'external', found)
         _morning_found = False
         try:
-            _r = subprocess.run(['schtasks', '/query', '/tn', 'QuantMorningPipeline', '/fo', 'CSV'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
+            # q920-11 同 :263 收敛（errors-only，编码跟随 locale）
+            _r = subprocess.run(['schtasks', '/query', '/tn', 'QuantMorningPipeline', '/fo', 'CSV'], capture_output=True, text=True, errors='replace', timeout=10)
             _morning_found = _r.returncode == 0 and 'QuantMorningPipeline' in _r.stdout
         except Exception:
             pass
