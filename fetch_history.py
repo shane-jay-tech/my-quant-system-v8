@@ -10,6 +10,7 @@ import os
 import sys
 import shutil
 import json
+import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +31,9 @@ HISTORY_FILE = DATA_DIR / 'history.csv'
 
 # 线程安全锁（写文件用）
 write_lock = Lock()
+
+# q920-01：重试吞异常要有声——真 bug 不许伪装成网络不稳
+logger = logging.getLogger(__name__)
 
 # ========== dry-run 保护（q916-04 切片1，设计稿 quant-dryrun-fetch-design-20260916）==========
 # 契约：网络请求路径不变；命中写点/备份副作用时短路并打印 [DRY-RUN]；默认行为（无旗标）逐字节不变。
@@ -86,7 +90,9 @@ def request_with_backoff(url, params, max_retries=MAX_RETRIES):
     v8.5+: 显式识别 Sina 的 456（频率超限）；它和 403 同等需要长退避。
     早期版本只对 403 退避，遇到 456 时只睡 1s 就重试，结果反复触发 → 看起来"卡住"实则被封禁。
     """
+    last_exc = None
     for attempt in range(max_retries):
+        last_exc = None
         try:
             time.sleep(random.uniform(*REQUEST_DELAY))
             resp = requests.get(url, params=params, headers=get_random_headers(), timeout=20)
@@ -99,8 +105,15 @@ def request_with_backoff(url, params, max_retries=MAX_RETRIES):
                 time.sleep(backoff)
             else:
                 time.sleep(1)
-        except Exception:
+        except Exception as exc:
+            last_exc = exc
             time.sleep(2 ** (attempt + 1))
+    if last_exc is not None:
+        # 只在"最后一次尝试是以异常告终"时告警；中途抖过但最后是正常返回非 200 的不算
+        logger.warning(
+            "[WARN] request_with_backoff 连续 %s 次未能取回数据，最后一次是异常而非限流：%r（url=%s）",
+            max_retries, last_exc, str(url)[:120],
+        )
     return None
 
 
@@ -486,10 +499,12 @@ def _parse_args(argv):
     """
     import argparse
     parser = argparse.ArgumentParser(description='历史日线数据下载器')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='预演模式：网络请求照常，所有写点与备份副作用短路，仅打印 would-write')
-    parser.add_argument('--dry-run-plan', action='store_true',
-                        help='只读盘上状态打印增量计划（股票池/待补代码/目标文件/追加vs重写）后退出：零网络、零写盘')
+    # q920-01：两个旗标语义不同（前者真拉数据、后者零网络），同时给必须当场拒掉而不是先到先得
+    flags = parser.add_mutually_exclusive_group()
+    flags.add_argument('--dry-run', action='store_true',
+                       help='预演模式：网络请求照常，所有写点与备份副作用短路，仅打印 would-write')
+    flags.add_argument('--dry-run-plan', action='store_true',
+                       help='只读盘上状态打印增量计划（股票池/待补代码/目标文件/追加vs重写）后退出：零网络、零写盘')
     return parser.parse_args(argv)
 
 

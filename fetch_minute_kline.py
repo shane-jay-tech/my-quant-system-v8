@@ -406,10 +406,12 @@ def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(description='分钟K线获取引擎 v2')
     parser.add_argument('code', nargs='?', default=None, help='单只股票代码（缺省＝批量 HS300 前 50）')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='预演模式：网络请求照常，写文件/删标记/状态写全部短路，仅打印')
-    parser.add_argument('--dry-run-plan', action='store_true',
-                        help='只读盘上状态打印增量计划（池/待补/目标文件/覆写方式）后退出：零网络、零写盘')
+    # q920-01：同 fetch_history——两个旗标同给必须报错退出，不能静默先到先得
+    flags = parser.add_mutually_exclusive_group()
+    flags.add_argument('--dry-run', action='store_true',
+                       help='预演模式：网络请求照常，写文件/删标记/状态写全部短路，仅打印')
+    flags.add_argument('--dry-run-plan', action='store_true',
+                       help='只读盘上状态打印增量计划（池/待补/目标文件/覆写方式）后退出：零网络、零写盘')
     args = parser.parse_args(argv)
     DRY = args.dry_run
     DRY_HITS.clear()
