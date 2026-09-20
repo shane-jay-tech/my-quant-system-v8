@@ -42,6 +42,7 @@ def test_dryrun_save_minute_data_writes_nothing(tmp_dirs, monkeypatch, capsys):
     got = fk.save_minute_data("600519", df)
     assert got.endswith("600519.csv")
     assert not Path(got).exists()                      # 零写盘
+    assert not minute.exists()                         # q920-02：连目录都不许建（"零字节但建了目录"也是留痕）
     assert "[DRY-RUN] W1 would-write" in capsys.readouterr().out
     assert fh_w1_recorded()
 
@@ -58,6 +59,21 @@ def test_default_save_minute_data_writes(tmp_dirs, capsys):
     assert Path(got).exists()
     assert "DRY-RUN" not in capsys.readouterr().out
     assert fk.DRY_HITS == []
+
+
+def test_default_path_creates_the_missing_minute_dir(tmp_path, monkeypatch):
+    """makedirs 挪到 DRY 判定之后，真写路径必须仍然自己把目录建出来（本例特意不预建）。"""
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(fk, "DATA_DIR", str(data))
+    monkeypatch.setattr(fk, "MINUTE_DIR", str(data / "minute_kline"))
+    monkeypatch.setattr(fk, "DRY", False)
+    monkeypatch.setattr(fk, "DRY_HITS", [])
+    assert not (data / "minute_kline").exists()
+
+    got = fk.save_minute_data("600519", pd.DataFrame({"close": [1.0]}))
+
+    assert Path(got).exists() and (data / "minute_kline").is_dir()
 
 
 def test_dryrun_degrade_marker_not_written(tmp_dirs, monkeypatch, capsys):

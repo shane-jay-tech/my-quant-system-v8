@@ -229,12 +229,13 @@ def calc_intraday_deviation(df):
 
 def save_minute_data(code, df):
     """保存分钟K线到文件"""
-    os.makedirs(MINUTE_DIR, exist_ok=True)
     filepath = os.path.join(MINUTE_DIR, f'{code}.csv')
     if DRY:
         print(f'[DRY-RUN] W1 would-write -> {filepath} ({len(df)} rows)')
         DRY_HITS.append(('W1', filepath))
         return filepath
+    # 建目录本身也是副作用：dry-run 的契约是"什么都不留"，连空目录都不许留（q920-02）
+    os.makedirs(MINUTE_DIR, exist_ok=True)
     df.to_csv(filepath, index=False, encoding='utf-8-sig')
     return filepath
 
