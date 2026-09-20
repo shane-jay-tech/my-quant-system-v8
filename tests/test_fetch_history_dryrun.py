@@ -18,13 +18,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fetch_history as fh  # noqa: E402
 
 
-@pytest.fixture()
-def tmp_hist(tmp_path, monkeypatch):
-    p = tmp_path / "history.csv"
-    # HISTORY_FILE 注入 str 口径（与 W3 'HISTORY_FILE + .tmp' 历史语义一致）；断言用 Path
-    monkeypatch.setattr(fh, "HISTORY_FILE", str(p))
+def _inject(monkeypatch, p, as_path):
+    monkeypatch.setattr(fh, "HISTORY_FILE", p if as_path else str(p))
     monkeypatch.setattr(fh, "DRY", False)
     monkeypatch.setattr(fh, "DRY_HITS", [])
+
+
+@pytest.fixture()
+def tmp_hist(tmp_path, monkeypatch):
+    """按**生产口径**注入：生产里 HISTORY_FILE = DATA_DIR / 'history.csv'，是 Path。
+
+    q920（2026-09-20）：这个 fixture 过去注入 str(p)，注释还写着「与 W3
+    HISTORY_FILE + .tmp 历史语义一致」——正是这个口径差让  HISTORY_FILE + '.tmp'
+    的 TypeError 在测试里永远看不到（str + str 恰好能过），于是最终去重
+    **长期没有真正执行过**，history.csv 里积了 48.6 万行重复。
+    测试必须用生产的类型口径；字符串口径另开一个 fixture 单独覆盖。
+    """
+    p = tmp_path / "history.csv"
+    _inject(monkeypatch, p, as_path=True)
+    yield p
+
+
+@pytest.fixture()
+def tmp_hist_str(tmp_path, monkeypatch):
+    """字符串注入口径（历史调用方按 str 注入的场景），与生产口径分开覆盖。"""
+    p = tmp_path / "history.csv"
+    _inject(monkeypatch, p, as_path=False)
     yield p
 
 
@@ -94,7 +113,7 @@ def test_dryrun_final_dedupe_short_circuit(tmp_hist, monkeypatch, capsys):
 
 
 def test_default_final_dedupe_rewrites(tmp_hist, monkeypatch, capsys):
-    """默认路径不变：无旗标时 W3 去重照常执行（str 路径语义）。"""
+    """默认路径不变：无旗标时 W3 去重照常执行（生产口径 = Path）。"""
     df = pd.DataFrame({"代码": ["001", "001"], "日期": ["2026-09-15", "2026-09-15"],
                        "收盘": [1.0, 1.0]})
     df.to_csv(tmp_hist, index=False, encoding="utf-8-sig")
@@ -102,3 +121,62 @@ def test_default_final_dedupe_rewrites(tmp_hist, monkeypatch, capsys):
     after = pd.read_csv(tmp_hist, dtype={"代码": str})
     assert len(after) == 1                             # 去重生效
     assert "DRY-RUN" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fixture_name", ["tmp_hist", "tmp_hist_str"])
+def test_final_dedupe_works_for_both_path_and_str(monkeypatch, capsys, request, fixture_name):
+    """q920 回归：Path 与 str 两种口径都必须能真正去重，且不留 .tmp。
+
+    这条直接针对那个长期静默失败：老代码在 Path 口径下抛 TypeError，
+    被 except 吞成一行 WARN，文件里的重复行原样留着。
+    """
+    hist = request.getfixturevalue(fixture_name)
+    pd.DataFrame({"代码": ["001", "001"], "日期": ["2026-09-15", "2026-09-15"],
+                  "收盘": [1.0, 1.0]}).to_csv(hist, index=False, encoding="utf-8-sig")
+    fh.final_dedupe()
+    out = capsys.readouterr().out
+    assert "DEGRADED" not in out, "去重失败了（%s 口径）：%s" % (fixture_name, out)
+    assert "Final dedupe failed" not in out, out
+    assert len(pd.read_csv(hist, dtype={"代码": str})) == 1
+    assert not Path(str(hist) + ".tmp").exists(), "临时文件残留"
+
+
+def test_final_dedupe_normalizes_code_padding(tmp_path, monkeypatch, capsys):
+    """q920：文件里同时存在 '1' 与 '000001' 两种写法（历史遗留，不补零那批停在 2026-05-12）。
+
+    下游主要消费者读进来都会 astype+zfill —— 早就把两者当同一只股票，于是同一交易日
+    被算两遍。只按 raw 代码去重合并不了它们，必须先规范化到 6 位。
+    """
+    p = tmp_path / "history.csv"
+    pd.DataFrame({
+        "代码": ["1", "000001", "1", "000001"],
+        "日期": ["2026-01-21", "2026-01-22", "2026-05-12", "2026-05-12"],
+        "收盘": [10.0, 10.5, 11.0, 11.0],
+    }).to_csv(p, index=False, encoding="utf-8-sig")
+    monkeypatch.setattr(fh, "HISTORY_FILE", p)
+    monkeypatch.setattr(fh, "DRY", False)
+    monkeypatch.setattr(fh, "DRY_HITS", [])
+    fh.final_dedupe()
+    after = pd.read_csv(p, dtype={"代码": str})
+    assert set(after["代码"]) == {"000001"}, after["代码"].tolist()
+    assert len(after) == 3, after                 # 2026-05-12 的两种写法合并成一行
+    assert not after.duplicated(subset=["代码", "日期"]).any()
+    assert "代码规范化" in capsys.readouterr().out
+
+
+def test_final_dedupe_failure_is_loud_not_silent(tmp_path, monkeypatch, capsys):
+    """清理失败必须打成醒目横幅（非致命但**不可静默**）——静默正是它躺几个月的原因。"""
+    p = tmp_path / "history.csv"
+    _seed(p)
+    monkeypatch.setattr(fh, "HISTORY_FILE", p)
+    monkeypatch.setattr(fh, "DRY", False)
+    monkeypatch.setattr(fh, "DRY_HITS", [])
+
+    def boom(*a, **kw):
+        raise OSError("模拟：读盘失败")
+    monkeypatch.setattr(fh.pd, "read_csv", boom)
+    fh.final_dedupe()                                  # 非致命：不抛
+    out = capsys.readouterr().out
+    assert "[DEGRADED]" in out and "最终去重失败" in out, out
+    assert "重复计数" in out, out                      # 必须说清后果
+    assert "final_dedupe()" in out, out                # 必须给修复命令

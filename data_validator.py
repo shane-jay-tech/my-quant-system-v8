@@ -73,6 +73,21 @@ def check_history_csv():
         return {'status': 'FAIL', 'reason': f'read failed: {e}', 'metrics': {}}
 
     metrics = {'rows': len(df), 'unique_codes': df['代码'].nunique()}
+
+    # q920（2026-09-20）：补 (代码, 日期) 重复检测。当时 history.csv 积了 48.6 万行重复
+    # （fetch_history.final_dedupe 因 Path+str 报错被 except 吞掉，长期没跑），而本校验
+    # 只查连续性与新鲜度 —— 等于这个退化根本没有探测器。非致命（WARN），但下游按代码
+    # 聚合会重复计数，必须报出来。
+    dup_rows = int(df.duplicated(subset=['代码', '日期'], keep=False).sum())
+    metrics['duplicate_rows'] = dup_rows
+    if dup_rows:
+        metrics['duplicate_pairs'] = int(df.duplicated(subset=['代码', '日期']).sum())
+        return {'status': 'WARN',
+                'reason': f'history.csv 含 {dup_rows} 行 (代码,日期) 重复'
+                          f'（{metrics["duplicate_pairs"]} 组）——下游按代码聚合会重复计数；'
+                          f'修复：python -c "import fetch_history as f; f.final_dedupe()"',
+                'metrics': metrics}
+
     latest_date = df['日期'].max().date()
     metrics['latest_date'] = latest_date.isoformat()
 

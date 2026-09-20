@@ -405,19 +405,59 @@ def final_dedupe():
         if os.path.exists(HISTORY_FILE):
             disk_df = pd.read_csv(HISTORY_FILE, dtype={'代码': str})
             if not disk_df.empty:
-                disk_df = disk_df.drop_duplicates(subset=['代码', '日期'], keep='first')
-                disk_df = disk_df.sort_values(['代码', '日期']).reset_index(drop=True)
+                # q920（2026-09-20）：先做**代码规范化**再压平。
+                # 文件里同时存在 '1' 与 '000001' 两种写法（历史遗留，不补零那批停在 2026-05-12）。
+                # 下游 11 处主要消费者（strategy / enhanced_backtest / sim_trade /
+                # position_sizer / multi_strategy / exit_advisor / factor_analysis /
+                # portfolio_risk / llm_analyst / replay_picks / strategy_feedback）读进来都会
+                # astype+zfill —— 也就是说它们早就把两者当**同一只股票**，于是同一交易日被算两遍
+                # （MA/RSI 窗口里凭空多出一根 K 线）。只按 raw 代码 drop_duplicates 合并不了它们，
+                # 因为字符串不同。先把代码规范化到 6 位，重复才真正压平。
+                _raw = disk_df['代码'].astype(str).str.strip()
+                _plain = _raw.str.fullmatch(r'[0-9]{1,6}')
+                disk_df = disk_df.assign(
+                    代码=_raw.where(~_plain, _raw.str.zfill(6)),
+                    # 同一 (代码,日期) 若两种写法都有，优先保留**本来就是 6 位**的那行
+                    _prefer=(_plain & (_raw.str.len() == 6)).astype(int),
+                )
+                _normalized = int((_raw != disk_df['代码']).sum())
+                _n_before = len(disk_df)
+                disk_df = (disk_df.sort_values(['代码', '日期', '_prefer'],
+                                               ascending=[True, True, False])
+                                  .drop_duplicates(subset=['代码', '日期'], keep='first')
+                                  .drop(columns=['_prefer'])
+                                  .reset_index(drop=True))
+                _collapsed = _n_before - len(disk_df)
+                if _normalized or _collapsed:
+                    print(f'  [dedupe] 代码规范化 {_normalized} 行 -> 6 位口径；'
+                          f'压平 (代码,日期) 重复 {_collapsed} 行（收尾整体重写时生效）')
                 if DRY:
                     print(f'[DRY-RUN] W3 would-rewrite -> {HISTORY_FILE} '
                           f'({len(disk_df)} rows, mode=rewrite)')
                     DRY_HITS.append(('W3', str(HISTORY_FILE)))
                     return
                 # 原子写（.tmp + os.replace）：断电/异常不会留下半截文件
-                tmp_path = HISTORY_FILE + '.tmp'
+                # q920（2026-09-20）：老写法是  HISTORY_FILE + '.tmp' 。生产里
+                # HISTORY_FILE = DATA_DIR / 'history.csv' 是 **Path**，Path + str 直接
+                # TypeError → 被下面 except 吞成一行 WARN，于是**去重长期根本没跑**，
+                # history.csv 里积了 48.6 万行重复（测试当时注入 str 口径，正好绕开）。
+                # 用 f-string 统一成字符串：str / Path 两种注入口径都成立。
+                tmp_path = f"{HISTORY_FILE}.tmp"
                 disk_df.to_csv(tmp_path, index=False, encoding='utf-8-sig')
                 os.replace(tmp_path, HISTORY_FILE)
     except Exception as e:
-        print(f"[WARN] Final dedupe failed: {e}（已保留原有数据，不会丢失）")
+        # 刻意**保持非致命**：update_history 在流水线注册表里是 fatal_on_fail=True，
+        # 清理失败若让 rc≠0 会掐掉当天整条流水线（选股/仓位/推送全没），代价远大于
+        # 「价格表里多留一批重复行」。但必须响到能被看见——原来只有一行 WARN，
+        # 结果它躺了很久没人发现，所以这里改成醒目横幅 + 明确后果 + 修复命令。
+        print("\n" + "!" * 62)
+        print("[DEGRADED] 最终去重失败：history.csv 仍含重复行")
+        print(f"  原因: {type(e).__name__}: {e}")
+        print(f"  文件: {HISTORY_FILE}")
+        print("  影响: 本次追加的数据已落盘，但跨批重复未被压平；")
+        print("        下游按 (代码, 日期) 聚合/回测会重复计数，必须先自行去重")
+        print("  修复: python -c 'import fetch_history as f; f.final_dedupe()'")
+        print("!" * 62 + "\n")
 
 
 def _resolve_increment_plan():
@@ -429,28 +469,20 @@ def _resolve_increment_plan():
     """
     import glob
     import re
+    from core.pool_resolver import resolve_pool
+
     today = datetime.now().strftime('%Y%m%d')
-    today_file = DATA_DIR / f'stock_{today}.csv'
-    used_fallback = False
-
-    if not os.path.exists(today_file):
-        files = sorted(glob.glob(str(DATA_DIR / 'stock_*.csv')), reverse=True)
-        if not files:
-            return None
-        today_file = files[0]
-        used_fallback = True
-
-    stock_df = pd.read_csv(today_file, dtype={'代码': str})
-    all_codes = list(dict.fromkeys(stock_df['代码'].tolist()))
-    pool_size = len(all_codes)
-    del stock_df        # 只要代码列，别把整张池表带到函数尾部
-
-    m = re.search(r'stock_(\d{8})\.csv', os.path.basename(str(today_file)))
-    if m:
-        y = m.group(1)
-        target_date_str = f'{y[0:4]}-{y[4:6]}-{y[6:8]}'
-    else:
-        target_date_str = datetime.now().strftime('%Y-%m-%d')
+    # q920-06：池解析统一走 core.pool_resolver（**默认行为不变**——来源链仍只有"产物文件"一项，
+    # 当日文件缺失时同样按文件名倒序回退最新一份）。
+    pool = resolve_pool([{'kind': 'product', 'data_dir': str(DATA_DIR),
+                          'target_date': today, 'pattern': 'stock_*.csv'}])
+    if not pool.codes:
+        return None
+    today_file = pool.pool_file
+    used_fallback = pool.used_fallback
+    all_codes = list(pool.codes)
+    pool_size = pool.size
+    target_date_str = pool.target_date or datetime.now().strftime('%Y-%m-%d')
 
     # 只保留 latest_by_code 字典，不整表驻留（Round-2 的 OOM 教训，见 main 原注释）
     latest_by_code = {}
@@ -476,8 +508,90 @@ def _resolve_increment_plan():
     }
 
 
-def describe_plan(plan: dict) -> None:
-    """把增量计划打成人类可读清单（--dry-run-plan 的全部输出；不碰网络、不落一个字节）。"""
+# ========== 盘上数据新鲜度受控探测（q920-07，q918-19 遗留2）==========
+# 计划档原本只报"存在/不存在"，不报"盘上最新交易日是哪天"。以下为**可选旗标**的实现：
+# 缺省不开，开了才在计划输出末尾多打一行；只读最新那份 csv 的**首行与末行**，
+# 不装载整表、不发任何网络请求、不落一个字节。
+_FRESHNESS_CHUNK_BYTES = 8192
+
+
+def _newest_csv(directory):
+    """返回目录下 mtime 最新的 .csv 路径（不递归）；没有则 None。"""
+    try:
+        cands = [p for p in os.listdir(directory) if p.lower().endswith('.csv')]
+    except OSError:
+        return None
+    if not cands:
+        return None
+    alive = [os.path.join(directory, n) for n in cands]
+    alive = [p for p in alive if os.path.isfile(p)]
+    if not alive:
+        return None
+    # mtime 相同时用文件名兜底，保证同参调用结果确定（测试可断言、复跑一致）
+    return max(alive, key=lambda p: (os.path.getmtime(p), os.path.basename(p)))
+
+
+def _csv_edge_lines(path):
+    """只读 csv 的**首行**（表头）与**末行**（最后一条非空数据），不解析整表。
+
+    末行用 seek 到文件尾部读一小块再取最后一条非空行——这样最新交易日探测
+    在 50 只股票 × 数千行的场景下依然是常数级 IO。
+    """
+    try:
+        with open(path, 'rb') as f:
+            head = f.readline()
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _FRESHNESS_CHUNK_BYTES))
+            tail = f.read()
+    except OSError:
+        return None, None
+    head_s = head.decode('utf-8-sig', 'replace').strip()
+    chunks = [ln.strip() for ln in tail.decode('utf-8', 'replace').splitlines() if ln.strip()]
+    return (head_s or None), (chunks[-1] if chunks else None)
+
+
+def _csv_last_date(path):
+    """从 csv 末行取日期/时间列值（截到前 10 位即 YYYY-MM-DD）；取不到返回 None。"""
+    head, last = _csv_edge_lines(path)
+    if not head or not last:
+        return None
+    cols = [c.strip() for c in head.split(',')]
+    vals = last.split(',')
+    for key in ('日期', 'date', '时间', 'datetime', 'trade_date'):
+        if key in cols:
+            idx = cols.index(key)
+            if idx < len(vals):
+                return vals[idx].strip()[:10]
+    return vals[0].strip()[:10] if vals else None
+
+
+def print_freshness(directory=None, label='目标目录', file_path=None):
+    """打印一行盘上数据新鲜度。缺文件/空目录**如实报不可判**，不猜、不报今天。
+
+    给了 file_path 就只看这一个文件（单文件数据源用）；否则在该目录内按 mtime 取最新 csv。
+    """
+    newest = file_path if (file_path is not None and os.path.isfile(file_path)) else None
+    if file_path is None:
+        newest = _newest_csv(directory)
+    if newest is None and file_path is None:
+        pass
+    if newest is None:
+        print(f"  盘上新鲜度: 不可判（{label} 下没有 csv）")
+        return None
+    date = _csv_last_date(newest)
+    if date is None:
+        print(f"  盘上新鲜度: 不可判（{os.path.basename(newest)} 空文件或无法取列）")
+        return None
+    print(f"  盘上新鲜度: 最新交易日 {date}（取自 {os.path.basename(newest)} 末行）")
+    return date
+
+
+def describe_plan(plan: dict, freshness: bool = False) -> None:
+    """把增量计划打成人类可读清单（--dry-run-plan 的全部输出；不碰网络、不落一个字节）。
+
+    freshness=True 时（q920-07 的 --plan-freshness）额外在末尾打一行盘上最新交易日。
+    """
     todo = plan['codes_to_fetch']
     print("[DRY-RUN-PLAN] 零网络 · 零写盘 —— 只读盘上状态得到的增量计划")
     print(f"  股票池文件: {plan['pool_file']}（{plan['pool_size']} 只）"
@@ -489,6 +603,8 @@ def describe_plan(plan: dict) -> None:
     print("  写入方式  : 逐批 stream-append（save_increment mode='a'）＋ 收尾整体重写去重（final_dedupe）")
     if todo:
         print(f"  待补样例  : {', '.join(todo[:10])}" + (" …" if len(todo) > 10 else ""))
+    if freshness:
+        print_freshness(label='目标文件', file_path=HISTORY_FILE)
 
 
 def _parse_args(argv):
@@ -505,6 +621,9 @@ def _parse_args(argv):
                        help='预演模式：网络请求照常，所有写点与备份副作用短路，仅打印 would-write')
     flags.add_argument('--dry-run-plan', action='store_true',
                        help='只读盘上状态打印增量计划（股票池/待补代码/目标文件/追加vs重写）后退出：零网络、零写盘')
+    # q920-07：与两个旗标**不互斥**（它是计划档的附加信息，不是另一种计划形态）；缺省不开
+    parser.add_argument('--plan-freshness', action='store_true',
+                        help='计划档附加信息：只读盘上最新 csv 的首尾行，打印其最新交易日（缺省不开）')
     return parser.parse_args(argv)
 
 
@@ -514,12 +633,13 @@ def main(argv=None):
     DRY = args.dry_run
     DRY_HITS.clear()
 
-    if args.dry_run_plan:
+    # q920-07：--plan-freshness 单独给也走计划档路径（否则开了旗标却无输出更费解）
+    if args.dry_run_plan or args.plan_freshness:
         plan = _resolve_increment_plan()
         if plan is None:
             print("[FATAL] No stock data file found. Run fetch_stock_data.py first.")
             return 1
-        describe_plan(plan)
+        describe_plan(plan, freshness=getattr(args, 'plan_freshness', False))
         return 0
 
     print(f"{'='*50}")
