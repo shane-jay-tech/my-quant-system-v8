@@ -173,13 +173,36 @@ def _python():
     return os.environ.get("QUANT_PYTHON") or sys.executable
 
 
-def _run_script(name, step, base_dir):
+# 脚本 -> 是否认识某旗标（一次进程内不必反复读盘）
+_FLAG_CACHE = {}
+
+def _step_accepts_flag(script_path, flag="--dry-run"):
+    """这个步骤脚本自己认不认识某个 CLI 旗标（读它源码里的 `add_argument`）。
+
+    q920-04：流水线 dry-run 要把旗标透传给子进程，但 44 个注册脚本里只有 6 个认识 `--dry-run`——
+    不认识的一律**拒绝裸跑**（透传前必须先问脚本本人），也不许把不认识的参数硬塞进去吃 argparse 的 exit 2。
+    """
+    key = (script_path, flag)
+    if key in _FLAG_CACHE:
+        return _FLAG_CACHE[key]
+    try:
+        with open(script_path, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+    except OSError:
+        ok = False
+    else:
+        ok = (f"add_argument('{flag}" in src) or (f'add_argument("{flag}' in src)
+    _FLAG_CACHE[key] = ok
+    return ok
+
+
+def _run_script(name, step, base_dir, extra_args=(), single_attempt=False):
     script_path = os.path.join(base_dir, step["script"])
     if not os.path.exists(script_path):
         print(f"[MISS] {name}: {script_path} not found")
         return 127
-    cmd = [_python(), script_path] + step.get("args", [])
-    retries = max(1, int(step.get("retry", 1)))
+    cmd = [_python(), script_path] + step.get("args", []) + list(extra_args)
+    retries = 1 if single_attempt else max(1, int(step.get("retry", 1)))
     wait = int(step.get("retry_wait", 0))
     rc = 1
     for attempt in range(1, retries + 1):
@@ -281,9 +304,30 @@ def run_all(only=None, dry_run=False):
         active = [s for s in active if s["id"] != "check_trading_day"]
 
     if dry_run:
+        # q920-04：不再只"打印将运行哪些步骤"——认识 --dry-run 的步骤真的拉起来预演（各步自己的语义），
+        # 不认识的一律跳过并点名；绝不为了"跑全"而把某步裸跑（裸跑=真写盘）。
         for i, s in enumerate(active, 1):
             print(f"  [{i}/{len(active)}] {s['id']:<22} {s['script']}")
-        return 0
+        passed = refused = 0
+        rc_any = 0
+        for s in active:
+            step = PIPELINE_STEPS[s["id"]]
+            script_path = os.path.join(base_dir, step["script"])
+            if not _step_accepts_flag(script_path):
+                refused += 1
+                print(f"[DRY-RUN] skip {s['id']:<22} 脚本 {step['script']} 不接受 --dry-run，拒绝裸跑")
+                continue
+            passed += 1
+            rc = _run_script(s["id"], step, base_dir, extra_args=["--dry-run"], single_attempt=True)
+            print(f"      -> {s['id']} [DRY-RUN] rc={rc}")
+            if rc != 0:
+                rc_any = rc
+                if step.get("fatal_on_fail"):
+                    print(f"[FATAL][DRY-RUN] {s['id']} 预演失败 (rc={rc})；中止")
+                    return rc
+        print(f"[DRY-RUN] 透传 {passed} 步真预演 | 跳过 {refused} 步（脚本不支持旗标）| "
+              f"流水线自身零写盘；rc={rc_any}")
+        return rc_any
 
     _t0_all = datetime.now()
     for i, s in enumerate(active, 1):
